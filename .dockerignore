@@ -1,0 +1,11 @@
+.pytest-temp
+.pytest-tmp
+.pytest_cache
+.prompt-smoke
+.tmp
+tmp
+tests-tmp*
+.venv
+.git
+__pycache__
+*.pyc
