@@ -1,103 +1,81 @@
-from src.infrastructure.wikidata_client import WikidataConfig, WikidataGateway
+from src.domain.models import EntityMention
+from src.infrastructure.wikidata_client import WikidataMCPClient, WikidataMCPConfig
 
 
-class DummyResponse:
-    def __init__(self, payload):
-        self.payload = payload
+class StubMCPClient(WikidataMCPClient):
+    def __init__(self):
+        super().__init__(WikidataMCPConfig(url="https://example.test/mcp/", allow_action_api_fallback=False))
 
-    def raise_for_status(self) -> None:
-        return None
-
-    def json(self):
-        return self.payload
-
-
-def entity(label: str, claims: dict | None = None) -> dict:
-    return {
-        "labels": {"en": {"value": label}},
-        "claims": claims or {},
-    }
-
-
-def statement(property_id: str, target_id: str) -> dict:
-    return {
-        "mainsnak": {
-            "property": property_id,
-            "datavalue": {
-                "value": {
-                    "entity-type": "item",
-                    "numeric-id": int(target_id[1:]),
-                    "id": target_id,
-                }
-            },
+    def search_items(self, query: str, limit: int = 5):
+        mapping = {
+            "Mango": [{"id": "Q1054564", "label": "Mango"}],
+            "fruit": [{"id": "Q1364", "label": "fruit"}],
         }
-    }
+        return mapping[query]
+
+    def get_statements(self, entity_id: str):
+        if entity_id == "Q1054564":
+            return [
+                {
+                    "property_id": "P31",
+                    "property_label": "instance of",
+                    "object_id": "Q1364",
+                    "object_label": "fruit",
+                }
+            ]
+        return []
 
 
-def test_shortest_path_finds_direct_wikidata_claim(monkeypatch):
-    entities = {
-        "Q1": entity("Source", {"P31": [statement("P31", "Q2")]}),
-        "Q2": entity("Target"),
-    }
+def test_resolve_entities_and_find_direct_relationships():
+    client = StubMCPClient()
+    mentions = [
+        EntityMention(surface="Mango", start=0, end=5),
+        EntityMention(surface="fruit", start=15, end=20),
+    ]
 
-    def fake_get(url, params=None, **kwargs):  # type: ignore[override]
-        entity_id = params["ids"]
-        return DummyResponse({"entities": {entity_id: entities[entity_id]}})
+    entities = client.resolve_entities(mentions)
+    relationships = client.find_relationships(entities)
 
-    monkeypatch.setattr("src.infrastructure.wikidata_client.requests.get", fake_get)
-    gateway = WikidataGateway(WikidataConfig(api_url="https://example.test/w/api.php"))
-
-    path = gateway.shortest_path("http://www.wikidata.org/entity/Q1", "http://www.wikidata.org/entity/Q2")
-
-    assert path is not None
-    assert len(path) == 1
-    assert path[0].subject_iri == "http://www.wikidata.org/entity/Q1"
-    assert path[0].subject_label == "Source"
-    assert path[0].predicate == "P31"
-    assert path[0].object_iri == "http://www.wikidata.org/entity/Q2"
-    assert path[0].object_label == "Target"
+    assert [entity.id for entity in entities] == ["Q1054564", "Q1364"]
+    assert len(relationships) == 1
+    assert relationships[0].subject_id == "Q1054564"
+    assert relationships[0].property_id == "P31"
+    assert relationships[0].object_id == "Q1364"
 
 
-def test_shortest_path_finds_two_hop_wikidata_claim_path(monkeypatch):
-    entities = {
-        "Q1": entity("Source", {"P279": [statement("P279", "Q2")]}),
-        "Q2": entity("Middle", {"P361": [statement("P361", "Q3")]}),
-        "Q3": entity("Target"),
-    }
+def test_action_api_fallback_sends_wikimedia_etiquette_headers_and_maxlag(monkeypatch):
+    captured = {}
 
-    def fake_get(url, params=None, **kwargs):  # type: ignore[override]
-        entity_id = params["ids"]
-        return DummyResponse({"entities": {entity_id: entities[entity_id]}})
+    class DummyResponse:
+        status_code = 200
+        headers = {}
+        text = "{}"
 
-    monkeypatch.setattr("src.infrastructure.wikidata_client.requests.get", fake_get)
-    gateway = WikidataGateway(WikidataConfig(api_url="https://example.test/w/api.php"))
+        def raise_for_status(self):
+            return None
 
-    path = gateway.shortest_path("http://www.wikidata.org/entity/Q1", "http://www.wikidata.org/entity/Q3", max_hops=2)
+        def json(self):
+            return {"search": [{"id": "Q60", "label": "New York City", "pageid": 60}]}
 
-    assert path is not None
-    assert [step.subject_label for step in path] == ["Source", "Middle"]
-    assert [step.object_label for step in path] == ["Middle", "Target"]
-    assert [step.predicate for step in path] == ["P279", "P361"]
+    def fake_request(method, url, **kwargs):
+        captured["method"] = method
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return DummyResponse()
 
-
-def test_shortest_path_respects_hub_threshold(monkeypatch):
-    entities = {
-        "Q1": entity("Source", {"P31": [statement("P31", "Q2"), statement("P31", "Q3")]}),
-        "Q2": entity("Other"),
-        "Q3": entity("Target"),
-    }
-
-    def fake_get(url, params=None, **kwargs):  # type: ignore[override]
-        entity_id = params["ids"]
-        return DummyResponse({"entities": {entity_id: entities[entity_id]}})
-
-    monkeypatch.setattr("src.infrastructure.wikidata_client.requests.get", fake_get)
-    gateway = WikidataGateway(WikidataConfig(api_url="https://example.test/w/api.php"))
-
-    path = gateway.shortest_path(
-        "http://www.wikidata.org/entity/Q1",
-        "http://www.wikidata.org/entity/Q3",
-        hub_threshold=1,
+    monkeypatch.setattr("src.infrastructure.wikidata_client.requests.request", fake_request)
+    client = WikidataMCPClient(
+        WikidataMCPConfig(
+            action_api_url="https://www.wikidata.org/w/api.php",
+            user_agent="hybrid-pipelines-agent/1.0 test@example.org",
+            maxlag=3,
+        )
     )
 
-    assert path is None
+    items = client._search_items_action_api("New York", limit=1)
+
+    assert items[0]["id"] == "Q60"
+    assert captured["method"] == "GET"
+    assert captured["kwargs"]["params"]["maxlag"] == 3
+    assert captured["kwargs"]["headers"]["User-Agent"] == "hybrid-pipelines-agent/1.0 test@example.org"
+    assert captured["kwargs"]["headers"]["Accept-Encoding"] == "gzip, deflate"

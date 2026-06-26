@@ -1,16 +1,13 @@
-from .wikidata_client import WikidataConfig, WikidataGateway
-from .ollama_client import OllamaClient, OllamaClientConfig, OllamaOptions
+from .ollama_client import OllamaClient, OllamaClientConfig
 from .prompt_repository import PromptRepository
-from .rdf_builder import RDFBuilder
 from .request_logger import RequestLogger
+from .wikidata_client import WikidataMCPClient, WikidataMCPConfig
 
 __all__ = [
-    "WikidataConfig",
-    "WikidataGateway",
     "OllamaClient",
     "OllamaClientConfig",
-    "OllamaOptions",
     "PromptRepository",
-    "RDFBuilder",
     "RequestLogger",
+    "WikidataMCPClient",
+    "WikidataMCPConfig",
 ]

@@ -2,5 +2,3 @@ Flask==3.0.0
 python-dotenv==1.0.1
 pytest==7.4.4
 requests==2.31.0
-neo4j==5.17.0
-rdflib==7.0.0
