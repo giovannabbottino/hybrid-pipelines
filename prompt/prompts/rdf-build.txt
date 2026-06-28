@@ -1,0 +1,31 @@
+Build RDF/Turtle for the input text using the extracted entities and Wikidata evidence.
+
+Input JSON:
+${PAYLOAD}
+
+Return valid Turtle only.
+
+Hard output rules:
+- The first character of the response must be "@" from the first @prefix line.
+- Do not write introductions such as "Here is the Turtle representation".
+- Do not use Markdown or code fences.
+- Do not add notes, explanations, placeholders, ellipses, templates, or examples.
+- Do not output invalid Turtle blocks such as "ex:Document { ... }".
+- Do not use prefixes that are not declared in this prompt.
+
+Requirements:
+- Use @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+- Use @prefix wd: <http://www.wikidata.org/entity/> .
+- Use @prefix kg: <https://example.org/wikidata-description/> .
+- Create triples directly from the main resolved entity to entities identified in the description/text.
+- Use rdfs:label for every wd:Q... entity that appears in the graph.
+- Use kg:is for "entity is description entity" relationships.
+- Use kg:of, kg:from, kg:in, kg:on, kg:to, or kg:with when the input text contains those relationship words between resolved entities.
+- If the sentence expresses negation, add kg:negated true on the main entity.
+- Do not invent Wikidata QIDs. Only use QIDs from the provided entities or relationships.
+- Do not include raw Wikidata statement dumps unless they directly connect the resolved entities.
+
+The response must start exactly like this:
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix wd: <http://www.wikidata.org/entity/> .
+@prefix kg: <https://example.org/wikidata-description/> .

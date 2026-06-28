@@ -1,0 +1,23 @@
+Extract entity and concept mentions from this text.
+
+Return strict JSON only:
+{
+  "entities": [
+    {
+      "surface": "exact text span",
+      "start": 0,
+      "end": 5,
+      "entity_type": "Entity|Class|Object|Concept|Place|Person|Organization",
+      "confidence": 0.0
+    }
+  ]
+}
+
+Rules:
+- Include named entities and common-noun concepts that participate in the meaning.
+- Use character offsets where possible.
+- Do not extract stopwords, verbs, or duplicate surfaces.
+- Keep at most 10 entities.
+
+Text:
+${TEXT}
