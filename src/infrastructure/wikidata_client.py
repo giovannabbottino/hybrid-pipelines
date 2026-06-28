@@ -63,11 +63,12 @@ class WikidataMCPClient:
         except requests.RequestException as exc:
             return {"status": "unavailable", "details": str(exc)}
 
-    def resolve_entities(self, mentions: list[EntityMention], limit: int = 3) -> list[WikidataEntity]:
+    def resolve_entities(self, mentions: list[EntityMention], limit: int = 3, context: str | None = None) -> list[WikidataEntity]:
         entities: list[WikidataEntity] = []
         for mention in mentions:
-            candidates = self.search_items(mention.surface, limit=limit)
-            chosen = candidates[0] if candidates else {}
+            query = _contextual_query(mention.surface, context or "")
+            candidates = self.search_items(query, limit=max(limit, 10))
+            chosen = _choose_candidate(candidates, context=context or mention.surface) if candidates else {}
             entity_id = _entity_id(chosen)
             label = _entity_label(chosen) or mention.surface
             iri = f"http://www.wikidata.org/entity/{entity_id}" if entity_id else None
@@ -88,14 +89,20 @@ class WikidataMCPClient:
         return entities
 
     def search_items(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
         try:
             result = self._call_tool("search_items", {"query": query, "lang": self.config.language})
             items = _coerce_items(result)
-            return items[:limit]
         except requests.RequestException:
             if not self.config.allow_action_api_fallback:
                 raise
-            return self._search_items_action_api(query=query, limit=limit)
+        if self.config.allow_action_api_fallback:
+            try:
+                items = _merge_candidates(self._search_items_action_api(query=query, limit=limit), items)
+            except requests.RequestException:
+                if not items:
+                    raise
+        return items[:limit]
 
     def get_statements(self, entity_id: str) -> list[dict[str, Any]]:
         try:
@@ -386,6 +393,19 @@ def _coerce_statements(result: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _merge_candidates(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in [*primary, *secondary]:
+        entity_id = _entity_id(item)
+        key = entity_id or json.dumps(item, sort_keys=True)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
 def _entity_id(item: dict[str, Any]) -> str | None:
     for key in ("id", "entity_id", "qid"):
         value = item.get(key)
@@ -428,6 +448,82 @@ def _entity_score(item: dict[str, Any]) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
     return None
+
+
+def _choose_candidate(candidates: list[dict[str, Any]], context: str) -> dict[str, Any]:
+    context_terms = _terms(context)
+    if not context_terms:
+        return candidates[0]
+
+    def score(item: dict[str, Any]) -> tuple[int, int, int, float]:
+        haystack = " ".join(
+            value
+            for value in (
+                _entity_label(item),
+                _entity_description(item),
+            )
+            if value
+        )
+        overlap = len(context_terms.intersection(_terms(haystack)))
+        type_penalty = 1 if _looks_like_named_work(item) else 0
+        concept_bonus = 1 if _looks_like_concrete_concept(item) else 0
+        rank = _entity_score(item) or 0.0
+        return overlap, concept_bonus, -type_penalty, rank
+
+    return max(candidates, key=score)
+
+
+def _contextual_query(surface: str, context: str) -> str:
+    return surface
+
+
+def _looks_like_named_work(item: dict[str, Any]) -> bool:
+    description = (_entity_description(item) or "").casefold()
+    bad_phrases = {
+        "scholarly article",
+        "scientific article",
+        "painting",
+        "song",
+        "album",
+        "video game",
+        "film",
+        "television series",
+        "book",
+        "company",
+        "musical group",
+        "family name",
+        "given name",
+        "surname",
+        "command",
+        "entomologist",
+        "person",
+        "human",
+    }
+    return any(phrase in description for phrase in bad_phrases)
+
+
+def _looks_like_concrete_concept(item: dict[str, Any]) -> bool:
+    description = (_entity_description(item) or "").casefold()
+    good_phrases = {
+        "fruit",
+        "plant",
+        "tree",
+        "woody",
+        "species",
+        "organism",
+        "taxon",
+        "food",
+    }
+    return any(phrase in description for phrase in good_phrases)
+
+
+def _terms(text: str) -> set[str]:
+    stopwords = {"a", "an", "the", "is", "are", "was", "were", "not", "from", "of", "in", "on", "to", "and", "or"}
+    return {
+        term
+        for term in re.findall(r"[a-z][a-z-]+", text.casefold())
+        if term not in stopwords and len(term) > 2
+    }
 
 
 def _statement_edges(statement: dict[str, Any]) -> list[dict[str, str]]:

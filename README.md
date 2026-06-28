@@ -49,6 +49,7 @@ The API uses the same endpoint through environment variables:
 | `OLLAMA_API_URL` | `http://localhost:11434` |
 | `OLLAMA_MODEL` | `llama3:8b` |
 | `OLLAMA_CSV_PATH` | `data/ollama_responses.csv` |
+| `OLLAMA_TIMEOUT_SECONDS` | `300` |
 | `ANALYZE_LOG_PATH` | `data/analyze_log.jsonl` |
 
 Prompt files live under `prompt/`. Keep reusable task prompts in `prompt/prompts/` and system prompts in `prompt/system/`.

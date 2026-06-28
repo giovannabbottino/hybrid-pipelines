@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 def _int_env(name: str) -> int | None:
@@ -35,6 +38,7 @@ class OllamaClientConfig:
     url: str = "http://localhost:11434"
     model: str = "llama3:8b"
     csv_path: Path = Path("data/ollama_responses.csv")
+    timeout_seconds: float = 300.0
     options: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -60,6 +64,7 @@ class OllamaClientConfig:
             url=os.getenv("OLLAMA_API_URL", "http://localhost:11434"),
             model=os.getenv("OLLAMA_MODEL", "llama3:8b"),
             csv_path=Path(os.getenv("OLLAMA_CSV_PATH", "data/ollama_responses.csv")),
+            timeout_seconds=_float_env("OLLAMA_TIMEOUT_SECONDS") or 300.0,
             options=options,
         )
 
@@ -67,6 +72,7 @@ class OllamaClientConfig:
 class OllamaClient:
     def __init__(self, config: OllamaClientConfig):
         self.config = config
+        self._logging_disabled = False
 
     def generate(self, system_prompt: str, prompt: str, stage: str) -> str:
         base_url = self.config.url.rstrip("/")
@@ -80,7 +86,7 @@ class OllamaClient:
         if self.config.options:
             payload["options"] = self.config.options
 
-        response = requests.post(target_url, json=payload, timeout=120)
+        response = requests.post(target_url, json=payload, timeout=self.config.timeout_seconds)
         response.raise_for_status()
         data = response.json()
         text = str(data.get("response") or "")
@@ -96,31 +102,37 @@ class OllamaClient:
             return {"status": "unavailable", "details": str(exc)}
 
     def _log(self, stage: str, prompt: str, response: dict[str, Any]) -> None:
-        self.config.csv_path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not self.config.csv_path.exists()
-        with self.config.csv_path.open("a", encoding="utf-8", newline="") as fp:
-            writer = csv.DictWriter(
-                fp,
-                fieldnames=[
-                    "stage",
-                    "model",
-                    "prompt",
-                    "response",
-                    "created_at",
-                    "done",
-                    "total_duration",
-                ],
-            )
-            if write_header:
-                writer.writeheader()
-            writer.writerow(
-                {
-                    "stage": stage,
-                    "model": response.get("model", self.config.model),
-                    "prompt": prompt,
-                    "response": response.get("response"),
-                    "created_at": response.get("created_at"),
-                    "done": response.get("done"),
-                    "total_duration": json.dumps(response.get("total_duration")),
-                }
-            )
+        if self._logging_disabled:
+            return
+        try:
+            self.config.csv_path.parent.mkdir(parents=True, exist_ok=True)
+            write_header = not self.config.csv_path.exists()
+            with self.config.csv_path.open("a", encoding="utf-8", newline="") as fp:
+                writer = csv.DictWriter(
+                    fp,
+                    fieldnames=[
+                        "stage",
+                        "model",
+                        "prompt",
+                        "response",
+                        "created_at",
+                        "done",
+                        "total_duration",
+                    ],
+                )
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(
+                    {
+                        "stage": stage,
+                        "model": response.get("model", self.config.model),
+                        "prompt": prompt,
+                        "response": response.get("response"),
+                        "created_at": response.get("created_at"),
+                        "done": response.get("done"),
+                        "total_duration": json.dumps(response.get("total_duration")),
+                    }
+                )
+        except OSError as exc:
+            self._logging_disabled = True
+            logger.warning("Disabling Ollama CSV logging after write failure: %s", exc)

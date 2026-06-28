@@ -38,7 +38,7 @@ class HybridAgentService:
         self._log(key, "analyze_started", {"text": request.text})
 
         mentions, extraction_raw = self._extract_entities(request.text, key)
-        entities = self.wikidata.resolve_entities(mentions, limit=self.candidate_limit)
+        entities = self.wikidata.resolve_entities(mentions, limit=self.candidate_limit, context=request.text)
         self._log(key, "wikidata_entities", {"entities": [entity.to_dict() for entity in entities]})
 
         relationships = self.wikidata.find_relationships(entities)
@@ -73,8 +73,7 @@ class HybridAgentService:
         items = payload.get("entities") if isinstance(payload, dict) else None
         mentions = [_mention_from_item(item) for item in items or [] if isinstance(item, dict)]
         mentions = [mention for mention in mentions if mention.surface]
-        if not mentions:
-            mentions = _fallback_mentions(text)
+        mentions = [*mentions, *_heuristic_mentions(text)]
         return _dedupe_mentions(mentions)[:10], raw
 
     def _build_rdf(self, text: str, entities: list, relationships: list, key: str) -> str:
@@ -83,7 +82,7 @@ class HybridAgentService:
         payload = {
             "text": text,
             "source_attribution": "Source: Wikidata",
-            "entities": [entity.to_dict() for entity in entities],
+            "entities": [_compact_entity(entity) for entity in entities],
             "relationships": [relationship.to_dict() for relationship in relationships],
         }
         prompt = prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
@@ -140,7 +139,7 @@ def _optional_float(value: Any) -> float | None:
         return None
 
 
-def _fallback_mentions(text: str) -> list[EntityMention]:
+def _heuristic_mentions(text: str) -> list[EntityMention]:
     mentions: list[EntityMention] = []
     stopwords = {"a", "an", "the", "is", "are", "was", "were", "not", "from", "of", "in", "on", "to"}
     for match in re.finditer(r"\b[A-Za-z][A-Za-z-]*\b", text):
@@ -163,9 +162,26 @@ def _dedupe_mentions(mentions: list[EntityMention]) -> list[EntityMention]:
     return deduped
 
 
+def _compact_entity(entity: Any, statement_limit: int = 8) -> dict[str, Any]:
+    payload = entity.to_dict()
+    statements = payload.get("statements") or []
+    priority = {"P31", "P279", "P361", "P527", "P1889", "P1582", "P171", "P105"}
+    payload["statements"] = sorted(
+        statements,
+        key=lambda item: 0 if item.get("property_id") in priority else 1,
+    )[:statement_limit]
+    return payload
+
+
 def _strip_code_fence(text: str) -> str:
     cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```(?:turtle|ttl|rdf)?\s*", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
+    fenced = re.search(r"```(?:turtle|ttl|rdf)?\s*(.*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        cleaned = fenced.group(1).strip()
+    prefix_index = cleaned.find("@prefix")
+    if prefix_index > 0:
+        cleaned = cleaned[prefix_index:].strip()
+    note_match = re.search(r"\n(?:Note|Please note|Explanation|The above)\b", cleaned, flags=re.IGNORECASE)
+    if note_match:
+        cleaned = cleaned[: note_match.start()].strip()
     return cleaned.strip()

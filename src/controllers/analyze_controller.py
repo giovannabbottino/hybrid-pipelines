@@ -30,6 +30,17 @@ def create_analyze_blueprint(service: HybridAgentService) -> Blueprint:
                     idempotence_key=payload.get("idempotence_key"),
                 )
             )
+        except requests.Timeout as exc:
+            return (
+                jsonify(
+                    {
+                        "error": "External service request timed out.",
+                        "details": str(exc),
+                        "hint": "Increase OLLAMA_TIMEOUT_SECONDS or reduce OLLAMA_NUM_PREDICT if the timeout is from Ollama.",
+                    }
+                ),
+                504,
+            )
         except requests.RequestException as exc:
             return jsonify({"error": "External service request failed.", "details": str(exc)}), 502
         except RuntimeError as exc:

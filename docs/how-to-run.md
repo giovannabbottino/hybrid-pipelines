@@ -20,6 +20,7 @@ Optional variables:
 ```powershell
 $env:OLLAMA_API_URL="http://localhost:11434"
 $env:OLLAMA_MODEL="llama3:8b"
+$env:OLLAMA_TIMEOUT_SECONDS="300"
 $env:SYSTEM_PROMPT_NAME="system/agent.txt"
 $env:ENTITY_EXTRACTION_PROMPT_NAME="prompts/entity-extraction.txt"
 $env:RDF_BUILD_PROMPT_NAME="prompts/rdf-build.txt"
