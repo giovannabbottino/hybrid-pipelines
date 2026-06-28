@@ -14,5 +14,5 @@ python -m pytest
 
 ## Notes
 
-- The automated tests do not require Neo4j.
-- Integration tests stub the Wikidata gateway; they do not call the live Wikidata API.
+- The automated tests do not require Ollama or live Wikidata MCP access.
+- Tests stub the LLM and Wikidata client where external calls would normally happen.

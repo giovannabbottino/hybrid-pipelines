@@ -1,545 +1,187 @@
 from __future__ import annotations
 
-import csv
 import json
 import re
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional
+from typing import Any
 from uuid import uuid4
 
-from ..domain.models import (
-    AnalyzeRequest,
-    AnalyzeResponse,
-    Candidate,
-    DisambiguatedMention,
-    Mention,
-    MentionCandidates,
-    MentionExtraction,
-    PathEvidence,
-    PathStep,
-)
+from ..domain.models import AnalyzeRequest, AnalyzeResponse, EntityMention
 from ..infrastructure.ollama_client import OllamaClient
 from ..infrastructure.prompt_repository import PromptRepository
-from ..infrastructure.rdf_builder import RDFBuilder
 from ..infrastructure.request_logger import RequestLogger
-from ..infrastructure.wikidata_client import WikidataGateway
+from ..infrastructure.wikidata_client import WikidataMCPClient
 
 
-class KnowledgeGraphService:
-    """
-    Orchestrates the hybrid pipeline:
-    1) LLM-based NER
-    2) Candidate selection via SKOS full-text search
-    3) Candidate disambiguation via shortest paths + LLM reasoning
-    4) RDF graph materialization (Turtle + JSON-LD)
-    """
-
-    _STOPWORDS = {
-        "a",
-        "an",
-        "the",
-        "and",
-        "or",
-        "but",
-        "if",
-        "then",
-        "than",
-        "from",
-        "to",
-        "of",
-        "in",
-        "on",
-        "at",
-        "by",
-        "for",
-        "with",
-        "without",
-        "is",
-        "are",
-        "was",
-        "were",
-        "am",
-        "be",
-        "being",
-        "been",
-        "not",
-        "no",
-        "we",
-        "i",
-        "you",
-        "he",
-        "she",
-        "it",
-        "they",
-        "this",
-        "that",
-        "these",
-        "those",
-    }
-
+class HybridAgentService:
     def __init__(
         self,
+        llm: OllamaClient,
+        wikidata: WikidataMCPClient,
         prompt_repository: PromptRepository,
-        default_prompt: str,
-        default_system_prompt: str,
-        path_to_text_prompt: str,
-        path_summary_prompt: str,
-        candidate_decision_prompt: str,
-        ollama_client: Optional[OllamaClient] = None,
-        graph_gateway: Optional[WikidataGateway] = None,
-        rdf_builder: Optional[RDFBuilder] = None,
-        rdf_log_path: Optional[Path] = None,
-        request_logger: Optional[RequestLogger] = None,
-        path_candidate_limit: int = 1,
-        path_within_mentions: bool = False,
-        enable_paths: bool = False,
-        max_mentions: int = 8,
-        candidate_decision_mode: str = "first",
+        system_prompt_name: str = "system/agent.txt",
+        entity_prompt_name: str = "prompts/entity-extraction.txt",
+        rdf_prompt_name: str = "prompts/rdf-build.txt",
+        request_logger: RequestLogger | None = None,
+        candidate_limit: int = 3,
     ) -> None:
+        self.llm = llm
+        self.wikidata = wikidata
         self.prompt_repository = prompt_repository
-        self.default_prompt = default_prompt
-        self.default_system_prompt = default_system_prompt
-        self.path_to_text_prompt = path_to_text_prompt
-        self.path_summary_prompt = path_summary_prompt
-        self.candidate_decision_prompt = candidate_decision_prompt
-        self.ollama_client = ollama_client
-        self.graph_gateway = graph_gateway
-        self.rdf_builder = rdf_builder or RDFBuilder()
-        self.rdf_log_path = rdf_log_path
+        self.system_prompt_name = system_prompt_name
+        self.entity_prompt_name = entity_prompt_name
+        self.rdf_prompt_name = rdf_prompt_name
         self.request_logger = request_logger
-        self.path_candidate_limit = max(1, int(path_candidate_limit))
-        self.path_within_mentions = path_within_mentions
-        self.enable_paths = enable_paths
-        self.max_mentions = max(1, int(max_mentions))
-        self.candidate_decision_mode = candidate_decision_mode
+        self.candidate_limit = max(1, int(candidate_limit))
 
     def analyze(self, request: AnalyzeRequest) -> AnalyzeResponse:
-        start_time = datetime.now(timezone.utc)
-        idempotence_key = request.idempotence_key or str(uuid4())
-        if not self.ollama_client:
-            raise RuntimeError("LLM client is not configured.")
-        if not self.graph_gateway:
-            raise RuntimeError("Entity gateway is not configured. Configure Wikidata access.")
+        key = request.idempotence_key or str(uuid4())
+        self._log(key, "analyze_started", {"text": request.text})
 
-        system_prompt_name = request.system_prompt_name or self.default_system_prompt
-        system_prompt_text = self.prompt_repository.load_prompt(system_prompt_name)
+        mentions, extraction_raw = self._extract_entities(request.text, key)
+        entities = self.wikidata.resolve_entities(mentions, limit=self.candidate_limit, context=request.text)
+        self._log(key, "wikidata_entities", {"entities": [entity.to_dict() for entity in entities]})
 
-        ner_prompt_name = request.prompt_name or self.default_prompt
-        ner_prompt_text = self.prompt_repository.load_prompt(ner_prompt_name)
-        mentions, ner_generation = self._extract_mentions(
-            text=request.text,
-            prompt_name=ner_prompt_name,
-            prompt_text=ner_prompt_text,
-            system_prompt_text=system_prompt_text,
-            idempotence_key=idempotence_key,
-        )
+        relationships = self.wikidata.find_relationships(entities)
+        self._log(key, "wikidata_relationships", {"relationships": [rel.to_dict() for rel in relationships]})
 
-        candidate_selections = self._select_candidates(mentions, top_k=request.top_k, idempotence_key=idempotence_key)
-        paths = self._compute_paths(
-            candidate_selections,
-            max_hops=request.max_hops,
-            hub_threshold=request.hub_threshold,
-            idempotence_key=idempotence_key,
-        )
-
-        path_sentences, path_generation = self._paths_to_text(paths, system_prompt_text, idempotence_key=idempotence_key)
-        summary_text, summary_generation = self._summarize_paths(path_sentences, system_prompt_text, idempotence_key=idempotence_key)
-        disambiguation, decision_generations = self._decide_candidates(
-            text=request.text,
-            mentions=mentions,
-            candidate_selections=candidate_selections,
-            summary_text=summary_text,
-            paths=paths,
-            system_prompt_text=system_prompt_text,
-            idempotence_key=idempotence_key,
-        )
-
-        rdf = self.rdf_builder.build(text=request.text, disambiguated_mentions=disambiguation)
-
-        generation_payload = {
-            "ner": ner_generation,
-            "path_translation": path_generation,
-            "path_summary": summary_generation,
-            "decisions": decision_generations,
-        }
-
-        end_time = datetime.now(timezone.utc)
-        self._log_final_rdf(start_time, end_time, request.text, rdf)
+        rdf = self._build_rdf(request.text, entities, relationships, key)
+        self._log(key, "rdf_built", {"rdf": rdf})
 
         return AnalyzeResponse(
             text=request.text,
-            mentions=mentions,
-            candidate_selections=candidate_selections,
-            disambiguation=disambiguation,
+            entities=entities,
+            relationships=relationships,
             rdf=rdf,
-            generation=generation_payload,
+            llm={"entity_extraction": extraction_raw},
         )
 
-    def health(self) -> dict:
-        wikidata_status = self.graph_gateway.health() if self.graph_gateway else {"status": "unconfigured"}
-        llm_status = self.ollama_client.health_check() if self.ollama_client else {"status": "unconfigured"}
-        return {"wikidata": wikidata_status, "llm": llm_status}
+    def health(self) -> dict[str, Any]:
+        return {
+            "llm": self.llm.health_check(),
+            "wikidata_mcp": self.wikidata.health(),
+        }
 
-    def _extract_mentions(
-        self,
-        text: str,
-        prompt_name: str,
-        prompt_text: str,
-        system_prompt_text: str,
-        idempotence_key: str,
-    ) -> tuple[MentionExtraction, dict]:
-        message = prompt_text.replace("${USER_TEXT}", text)
-        self._log_event(idempotence_key, "ollama_request", {"stage": "ner", "prompt_name": prompt_name, "input_text": text})
-        generation = self.ollama_client.generate(
-            system_prompt=system_prompt_text,
-            prompt=message,
-            prompt_name=prompt_name,
-            input_text=text,
-        )
-        self._log_event(
-            idempotence_key,
-            "ollama_response",
-            {"stage": "ner", "prompt_name": prompt_name, "response": generation},
-        )
+    def _extract_entities(self, text: str, key: str) -> tuple[list[EntityMention], str]:
+        system_prompt = self.prompt_repository.load_prompt(self.system_prompt_name)
+        prompt_template = self.prompt_repository.load_prompt(self.entity_prompt_name)
+        prompt = prompt_template.replace("${TEXT}", text)
+        self._log(key, "llm_entity_request", {"prompt": prompt})
+        raw = self.llm.generate(system_prompt=system_prompt, prompt=prompt, stage="entity_extraction")
+        self._log(key, "llm_entity_response", {"response": raw})
 
-        payload = generation.get("response") or "{}"
-        try:
-            data = json.loads(payload)
-        except json.JSONDecodeError:
-            data = {"mentions": self._mentions_from_truncated_json(payload)}
+        payload = _json_from_text(raw)
+        items = payload.get("entities") if isinstance(payload, dict) else None
+        mentions = [_mention_from_item(item) for item in items or [] if isinstance(item, dict)]
+        mentions = [mention for mention in mentions if mention.surface]
+        mentions = [*mentions, *_heuristic_mentions(text)]
+        return _dedupe_mentions(mentions)[:10], raw
 
-        mentions: list[Mention] = []
-        for item in data.get("mentions", []):
-            mentions.append(
-                Mention(
-                    surface=item.get("surface", ""),
-                    label=item.get("label"),
-                    start=item.get("start"),
-                    end=item.get("end"),
-                    confidence=item.get("confidence"),
-                )
-            )
-        mentions = self._merge_mentions(text, mentions)
-        return MentionExtraction(mentions=mentions), generation
+    def _build_rdf(self, text: str, entities: list, relationships: list, key: str) -> str:
+        system_prompt = self.prompt_repository.load_prompt(self.system_prompt_name)
+        prompt_template = self.prompt_repository.load_prompt(self.rdf_prompt_name)
+        payload = {
+            "text": text,
+            "source_attribution": "Source: Wikidata",
+            "entities": [_compact_entity(entity) for entity in entities],
+            "relationships": [relationship.to_dict() for relationship in relationships],
+        }
+        prompt = prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
+        self._log(key, "llm_rdf_request", {"prompt": prompt})
+        rdf = self.llm.generate(system_prompt=system_prompt, prompt=prompt, stage="rdf_build").strip()
+        self._log(key, "llm_rdf_response", {"response": rdf})
+        return _strip_code_fence(rdf)
 
-    def _mentions_from_truncated_json(self, payload: str) -> list[dict]:
-        mentions: list[dict] = []
-        for match in re.finditer(r'\{\s*"surface"\s*:\s*"([^"]+)"[^{}]*\}', payload):
-            try:
-                item = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                continue
-            mentions.append(item)
-            if len(mentions) >= self.max_mentions:
-                break
-        return mentions
-
-    def _merge_mentions(self, text: str, llm_mentions: list[Mention]) -> list[Mention]:
-        merged: dict[tuple[int | None, int | None, str], Mention] = {}
-        for mention in llm_mentions + self._heuristic_mentions(text):
-            key = (mention.start, mention.end, mention.surface.casefold())
-            current = merged.get(key)
-            if current is None or (mention.confidence or 0.0) > (current.confidence or 0.0):
-                merged[key] = mention
-        return sorted(
-            merged.values(),
-            key=lambda mention: (
-                mention.start if mention.start is not None else 10**9,
-                mention.end if mention.end is not None else 10**9,
-                mention.surface.casefold(),
-            ),
-        )[: self.max_mentions]
-
-    def _heuristic_mentions(self, text: str) -> list[Mention]:
-        mentions: list[Mention] = []
-
-        def add(surface: str, start: int, end: int, label: str = "Entity", confidence: float = 0.35) -> None:
-            normalized = surface.strip()
-            if not normalized:
-                return
-            if normalized.casefold() in self._STOPWORDS:
-                return
-            mentions.append(
-                Mention(
-                    surface=normalized,
-                    label=label,
-                    start=start,
-                    end=end,
-                    confidence=confidence,
-                )
-            )
-
-        for match in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", text):
-            add(match.group(1), match.start(1), match.end(1), confidence=0.45)
-
-        for match in re.finditer(r"\b(?:a|an|the)\s+([A-Za-z][A-Za-z-]*)\b", text, flags=re.IGNORECASE):
-            add(match.group(1), match.start(1), match.end(1))
-
-        for match in re.finditer(r"\b(?:from|of|in|on|at|to)\s+(?:a|an|the\s+)?([A-Za-z][A-Za-z-]*)\b", text, flags=re.IGNORECASE):
-            add(match.group(1), match.start(1), match.end(1))
-
-        return mentions
-
-    def _select_candidates(self, mentions: MentionExtraction, top_k: int, idempotence_key: str) -> list[MentionCandidates]:
-        selections: list[MentionCandidates] = []
-        for mention in mentions.mentions:
-            self._log_event(
-                idempotence_key,
-                "wikidata_request",
-                {"stage": "candidate_selection", "surface": mention.surface, "top_k": top_k},
-            )
-            candidates = self.graph_gateway.search_candidates(surface=mention.surface, limit=top_k)
-            self._log_event(
-                idempotence_key,
-                "wikidata_response",
-                {"stage": "candidate_selection", "surface": mention.surface, "candidates": [c.to_dict() for c in candidates]},
-            )
-            selections.append(MentionCandidates(surface=mention.surface, candidates=candidates))
-        return selections
-
-    def _compute_paths(
-        self,
-        candidate_selections: list[MentionCandidates],
-        max_hops: int,
-        hub_threshold: int | None,
-        idempotence_key: str,
-    ) -> list[list[PathStep]]:
-        if not self.enable_paths:
-            return []
-
-        paths: list[list[PathStep]] = []
-        for idx, selection in enumerate(candidate_selections):
-            for candidate in selection.candidates[: self.path_candidate_limit]:
-                # Paths to candidates in other mentions
-                for other_idx, other in enumerate(candidate_selections):
-                    if idx == other_idx:
-                        continue
-                    for other_candidate in other.candidates[: self.path_candidate_limit]:
-                        self._log_event(
-                            idempotence_key,
-                            "wikidata_request",
-                            {
-                                "stage": "shortest_path",
-                                "source": candidate.iri,
-                                "target": other_candidate.iri,
-                                "max_hops": max_hops,
-                                "hub_threshold": hub_threshold,
-                            },
-                        )
-                        path = self.graph_gateway.shortest_path(
-                            candidate.iri,
-                            other_candidate.iri,
-                            max_hops=max_hops,
-                            hub_threshold=hub_threshold,
-                        )
-                        if path:
-                            self._log_event(
-                                idempotence_key,
-                                "wikidata_response",
-                                {
-                                    "stage": "shortest_path",
-                                    "source": candidate.iri,
-                                    "target": other_candidate.iri,
-                                    "path_length": len(path),
-                                },
-                            )
-                            paths.append(path)
-
-                if not self.path_within_mentions:
-                    continue
-
-                # Optional intra-mention disambiguation (pairwise within same mention)
-                for other_candidate in selection.candidates[: self.path_candidate_limit]:
-                    if other_candidate.iri == candidate.iri:
-                        continue
-                    self._log_event(
-                        idempotence_key,
-                        "wikidata_request",
-                        {
-                            "stage": "shortest_path",
-                            "source": candidate.iri,
-                            "target": other_candidate.iri,
-                            "max_hops": max_hops,
-                            "hub_threshold": hub_threshold,
-                        },
-                    )
-                    path = self.graph_gateway.shortest_path(
-                        candidate.iri,
-                        other_candidate.iri,
-                        max_hops=max_hops,
-                        hub_threshold=hub_threshold,
-                    )
-                    if path:
-                        self._log_event(
-                            idempotence_key,
-                            "wikidata_response",
-                            {
-                                "stage": "shortest_path",
-                                "source": candidate.iri,
-                                "target": other_candidate.iri,
-                                "path_length": len(path),
-                            },
-                        )
-                        paths.append(path)
-        return paths
-
-    def _paths_to_text(self, paths: list[list[PathStep]], system_prompt_text: str, idempotence_key: str) -> tuple[list[str], dict | None]:
-        if not paths:
-            return [], None
-
-        prompt_text = self.prompt_repository.load_prompt(self.path_to_text_prompt)
-        payload = json.dumps([[step.to_dict() for step in path] for path in paths], ensure_ascii=False)
-        message = prompt_text.replace("${PATHS_JSON}", payload)
-        self._log_event(idempotence_key, "ollama_request", {"stage": "path_to_text", "prompt_name": self.path_to_text_prompt})
-        generation = self.ollama_client.generate(
-            system_prompt=system_prompt_text,
-            prompt=message,
-            prompt_name=self.path_to_text_prompt,
-        )
-        self._log_event(
-            idempotence_key,
-            "ollama_response",
-            {"stage": "path_to_text", "prompt_name": self.path_to_text_prompt, "response": generation},
-        )
-        response_text = generation.get("response") or "[]"
-        try:
-            path_sentences = json.loads(response_text)
-            if not isinstance(path_sentences, list):
-                raise ValueError("Path translation output must be a list of strings.")
-        except (json.JSONDecodeError, ValueError) as exc:
-            raise ValueError("Path translation stage returned invalid JSON.") from exc
-
-        return path_sentences, generation
-
-    def _summarize_paths(self, path_sentences: list[str], system_prompt_text: str, idempotence_key: str) -> tuple[str, dict | None]:
-        if not path_sentences:
-            return "", None
-        prompt_text = self.prompt_repository.load_prompt(self.path_summary_prompt)
-        message = prompt_text.replace("${PATH_SENTENCES_JSON}", json.dumps(path_sentences, ensure_ascii=False))
-        self._log_event(idempotence_key, "ollama_request", {"stage": "path_summary", "prompt_name": self.path_summary_prompt})
-        generation = self.ollama_client.generate(
-            system_prompt=system_prompt_text,
-            prompt=message,
-            prompt_name=self.path_summary_prompt,
-        )
-        self._log_event(
-            idempotence_key,
-            "ollama_response",
-            {"stage": "path_summary", "prompt_name": self.path_summary_prompt, "response": generation},
-        )
-        summary = generation.get("response") or ""
-        return summary.strip(), generation
-
-    def _decide_candidates(
-        self,
-        text: str,
-        mentions: MentionExtraction,
-        candidate_selections: list[MentionCandidates],
-        summary_text: str,
-        paths: list[list[PathStep]],
-        system_prompt_text: str,
-        idempotence_key: str,
-    ) -> tuple[list[DisambiguatedMention], list[dict]]:
-        decisions: list[DisambiguatedMention] = []
-        decision_generations: list[dict] = []
-        prompt_template = self.prompt_repository.load_prompt(self.candidate_decision_prompt)
-
-        for mention, selection in zip(mentions.mentions, candidate_selections):
-            if self.candidate_decision_mode == "first":
-                decisions.append(
-                    DisambiguatedMention(
-                        surface=mention.surface,
-                        label=mention.label,
-                        start=mention.start,
-                        end=mention.end,
-                        confidence=mention.confidence,
-                        chosen=selection.candidates[0] if selection.candidates else None,
-                        evidence=PathEvidence(paths=paths, summary=summary_text or None),
-                    )
-                )
-                continue
-
-            context = self._extract_context(text, mention.start, mention.end)
-            candidate_payload = [c.to_dict() for c in selection.candidates]
-            message = (
-                prompt_template.replace("${SURFACE}", mention.surface)
-                .replace("${CONTEXT}", context)
-                .replace("${SUMMARY}", summary_text or "")
-                .replace("${CANDIDATES_JSON}", json.dumps(candidate_payload, ensure_ascii=False))
-            )
-            generation = self.ollama_client.generate(
-                system_prompt=system_prompt_text,
-                prompt=message,
-                prompt_name=self.candidate_decision_prompt,
-            )
-            decision_generations.append(generation)
-            self._log_event(
-                idempotence_key,
-                "ollama_response",
-                {"stage": "candidate_decision", "prompt_name": self.candidate_decision_prompt, "response": generation},
-            )
-
-            chosen_candidate = self._parse_decision(generation.get("response"), selection)
-            decisions.append(
-                DisambiguatedMention(
-                    surface=mention.surface,
-                    label=mention.label,
-                    start=mention.start,
-                    end=mention.end,
-                    confidence=mention.confidence,
-                    chosen=chosen_candidate,
-                    evidence=PathEvidence(paths=paths, summary=summary_text or None),
-                )
-            )
-        return decisions, decision_generations
-
-    def _parse_decision(self, response_text: str | None, selection: MentionCandidates) -> Candidate | None:
-        if not response_text:
-            return selection.candidates[0] if selection.candidates else None
-        try:
-            data = json.loads(response_text)
-            iri = data.get("iri")
-            label = data.get("label")
-            if not iri and selection.candidates:
-                return selection.candidates[0]
-            return Candidate(iri=iri, label=label or "", score=data.get("score"))
-        except json.JSONDecodeError:
-            return selection.candidates[0] if selection.candidates else None
-
-    def _extract_context(self, text: str, start: int | None, end: int | None, window: int = 80) -> str:
-        if start is None or end is None:
-            return text[: window * 2]
-        left = max(0, start - window)
-        right = min(len(text), end + window)
-        return text[left:right]
-
-    def _log_final_rdf(self, start_time: datetime, end_time: datetime, input_text: str, rdf: RDFGraphResult) -> None:
-        if not self.rdf_log_path:
-            return
-        self.rdf_log_path.parent.mkdir(parents=True, exist_ok=True)
-        write_header = not self.rdf_log_path.exists()
-        with self.rdf_log_path.open("a", encoding="utf-8", newline="") as fp:
-            writer = csv.DictWriter(fp, fieldnames=["start_time", "end_time", "input_text", "rdf_turtle", "model", "rdf_valid"])
-            if write_header:
-                writer.writeheader()
-            # Heuristic: consider RDF valid if Turtle has at least one triple terminator "."
-            rdf_valid = bool(rdf.turtle and "." in rdf.turtle)
-            model_name = None
-            if self.ollama_client:
-                client_config = getattr(self.ollama_client, "config", None)
-                model_name = getattr(client_config, "model", None)
-            writer.writerow(
-                {
-                    "start_time": start_time.isoformat(),
-                    "end_time": end_time.isoformat(),
-                    "input_text": input_text,
-                    "rdf_turtle": rdf.turtle,
-                    "model": model_name,
-                    "rdf_valid": rdf_valid,
-                }
-            )
-
-    def _log_event(self, idempotence_key: str, event: str, payload: dict) -> None:
+    def _log(self, key: str, event: str, payload: dict[str, Any]) -> None:
         if self.request_logger:
-            self.request_logger.log(idempotence_key=idempotence_key, event=event, payload=payload)
+            self.request_logger.log(idempotence_key=key, event=event, payload=payload)
+
+
+def _json_from_text(text: str) -> dict[str, Any]:
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else {}
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+        if not match:
+            return {}
+        try:
+            data = json.loads(match.group(0))
+            return data if isinstance(data, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+
+def _mention_from_item(item: dict[str, Any]) -> EntityMention:
+    return EntityMention(
+        surface=str(item.get("surface") or "").strip(),
+        start=_optional_int(item.get("start")),
+        end=_optional_int(item.get("end")),
+        entity_type=str(item.get("entity_type") or item.get("label") or "Entity"),
+        confidence=_optional_float(item.get("confidence")),
+    )
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _heuristic_mentions(text: str) -> list[EntityMention]:
+    mentions: list[EntityMention] = []
+    stopwords = {"a", "an", "the", "is", "are", "was", "were", "not", "from", "of", "in", "on", "to"}
+    for match in re.finditer(r"\b[A-Za-z][A-Za-z-]*\b", text):
+        surface = match.group(0)
+        if surface.casefold() in stopwords:
+            continue
+        mentions.append(EntityMention(surface=surface, start=match.start(), end=match.end(), entity_type="Entity", confidence=0.2))
+    return mentions
+
+
+def _dedupe_mentions(mentions: list[EntityMention]) -> list[EntityMention]:
+    seen: set[str] = set()
+    deduped: list[EntityMention] = []
+    for mention in mentions:
+        key = mention.surface.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(mention)
+    return deduped
+
+
+def _compact_entity(entity: Any, statement_limit: int = 8) -> dict[str, Any]:
+    payload = entity.to_dict()
+    statements = payload.get("statements") or []
+    priority = {"P31", "P279", "P361", "P527", "P1889", "P1582", "P171", "P105"}
+    payload["statements"] = sorted(
+        statements,
+        key=lambda item: 0 if item.get("property_id") in priority else 1,
+    )[:statement_limit]
+    return payload
+
+
+def _strip_code_fence(text: str) -> str:
+    cleaned = text.strip()
+    fenced = re.search(r"```(?:turtle|ttl|rdf)?\s*(.*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        cleaned = fenced.group(1).strip()
+    prefix_index = cleaned.find("@prefix")
+    if prefix_index > 0:
+        cleaned = cleaned[prefix_index:].strip()
+    note_match = re.search(r"\n(?:Note|Please note|Explanation|The above)\b", cleaned, flags=re.IGNORECASE)
+    if note_match:
+        cleaned = cleaned[: note_match.start()].strip()
+    return cleaned.strip()

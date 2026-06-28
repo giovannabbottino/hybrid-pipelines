@@ -1,3 +1,0 @@
-You are summarizing relational evidence between concepts.
-Input is a JSON list of path phrases: ${PATH_SENTENCES_JSON}
-Write a concise summary (1-3 sentences) explaining how the concepts are connected. Avoid extra formatting.

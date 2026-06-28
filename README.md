@@ -1,72 +1,78 @@
-# Hybrid Pipeline Knowledge Graph Construction API
+# Hybrid Pipelines Wikidata Agent
 
-Flask API that turns free text into an RDF knowledge graph using a hybrid pipeline:
-1. **LLM-based NER** for entity/concept mentions with offsets
-2. **Candidate selection** via Wikidata entity search
-3. **Candidate disambiguation** using surface/context and optional path evidence
-4. **RDF materialization** with document, mention, grounded entity, and assertion nodes
+Flask API that exposes a single agent endpoint:
 
-## Process Flow
-
-![Process Flow](docs/figures/process.jpg)
-
-## Project Layout
-- `src/` Flask app (controllers/application/domain/infrastructure)
-- `prompt/` system + step-specific prompts
-- `scripts/` legacy preprocessing/import helpers from the earlier graph-backed pipeline
-- `tests/` unit, controller, and integration coverage
-
-## Running
 ```bash
-pip install -r requirements.txt
-export FLASK_APP=src.app:create_app
-flask run --port 5050
+curl -X POST http://127.0.0.1:5050/analyze \
+  -H "Content-Type: application/json" \
+  -d "{\"text\":\"Mango is not a fruit from a tree.\"}"
 ```
 
-## Tests
-```bash
-pytest
-```
+The agent flow is intentionally simple:
 
-## Sequence Diagram
-
-![Analysis](docs/figures/analyze.png)
+1. Use the LLM to extract entities and concepts from the input text.
+2. Use the configured Wikidata MCP server to search and inspect those entities.
+3. Find direct Wikidata relationships between the resolved entities.
+4. Ask the LLM to build RDF/Turtle from the text and Wikidata evidence.
 
 ## Configuration
 
-### Prompts and LLM
+The Wikidata MCP server is configured with:
 
-| Variable | Description | Default/Example |
-|---|---|---|
-| `DEFAULT_PROMPT_NAME` | Main NER prompt | `prompts/ner-acm-ccs.txt` |
-| `DEFAULT_SYSTEM_PROMPT_NAME` | System prompt | `system/knowledge_graph.txt` |
-| `PATH_TO_TEXT_PROMPT_NAME` | Path-to-text prompt | `prompts/path-to-text.txt` |
-| `PATH_SUMMARY_PROMPT_NAME` | Path summary prompt | `prompts/path-summary.txt` |
-| `CANDIDATE_DECISION_PROMPT_NAME` | Candidate decision prompt | `prompts/candidate-decision.txt` |
-| `OLLAMA_API_URL` | Ollama API URL | `http://localhost:11434` |
-| `OLLAMA_MODEL` | LLM model name | `llama3:8b` |
-| `OLLAMA_CSV_PATH` | Path to Ollama response CSV log | `data/ollama_responses.csv` |
-| `OLLAMA_SEED` | Seed for reproducibility | `42` |
-| `OLLAMA_TEMPERATURE` | Sampling temperature | `0.2` |
-| `OLLAMA_TOP_K` | Top-K sampling parameter | `40` |
-| `OLLAMA_TOP_P` | Top-P sampling parameter | `0.9` |
-| `OLLAMA_MIN_P` | Minimum probability threshold | `0.05` |
-| `OLLAMA_STOP` | Stop sequence | empty |
-| `OLLAMA_NUM_CTX` | Context window size | unset |
-| `OLLAMA_NUM_PREDICT` | Max tokens to predict | unset |
+```json
+{
+  "mcpServers": {
+    "wikidata": {
+      "type": "streamable_http",
+      "url": "https://wd-mcp.wmcloud.org/mcp/"
+    }
+  }
+}
+```
 
-### Wikidata and logs
+The API uses the same endpoint through environment variables:
 
-| Variable | Description | Default/Example |
-|---|---|---|
-| `WIKIDATA_API_URL` | Wikidata Action API base URL | `https://www.wikidata.org/w/api.php` |
-| `WIKIDATA_USER_AGENT` | User-Agent sent to Wikidata | `hybrid-pipelines-kg/1.0` |
-| `WIKIDATA_TIMEOUT_SECONDS` | Timeout for Wikidata HTTP calls | `30` |
-| `WIKIDATA_LANGUAGE` | Search language used in Wikidata lookup | `en` |
-| `RDF_LOG_PATH` | Path to RDF response log | `data/hybrid-responses.csv` |
-| `ANALYZE_LOG_PATH` | Path to analysis log | `data/analyze_log.jsonl` |
+| Variable | Default |
+|---|---|
+| `SYSTEM_PROMPT_NAME` | `system/agent.txt` |
+| `ENTITY_EXTRACTION_PROMPT_NAME` | `prompts/entity-extraction.txt` |
+| `RDF_BUILD_PROMPT_NAME` | `prompts/rdf-build.txt` |
+| `WIKIDATA_MCP_URL` | `https://wd-mcp.wmcloud.org/mcp/` |
+| `WIKIDATA_LANGUAGE` | `en` |
+| `WIKIDATA_TIMEOUT_SECONDS` | `60` |
+| `WIKIDATA_CANDIDATE_LIMIT` | `3` |
+| `WIKIDATA_ALLOW_ACTION_API_FALLBACK` | `true` |
+| `WIKIDATA_USER_AGENT` | `hybrid-pipelines-agent/1.0` |
+| `WIKIDATA_MAXLAG` | `5` |
+| `WIKIDATA_MAX_RETRIES` | `2` |
+| `WIKIDATA_RETRY_BACKOFF_SECONDS` | `2` |
+| `OLLAMA_API_URL` | `http://localhost:11434` |
+| `OLLAMA_MODEL` | `llama3:8b` |
+| `OLLAMA_CSV_PATH` | `data/ollama_responses.csv` |
+| `OLLAMA_TIMEOUT_SECONDS` | `300` |
+| `ANALYZE_LOG_PATH` | `data/analyze_log.jsonl` |
 
-## Notes
-- The active runtime no longer requires Neo4j for candidate lookup.
-- The current Wikidata gateway does not compute shortest paths, so path evidence may be empty.
-- For sentences such as `Mango is not a fruit from a tree`, the RDF may include an `ex:Assertion` node with `ex:copulaVerb`, `ex:negated`, `ex:subject`, `ex:object`, and `ex:contextEntity`.
+Prompt files live under `prompt/`. Keep reusable task prompts in `prompt/prompts/` and system prompts in `prompt/system/`.
+
+Wikidata access follows the public access guidance: use Wikidata MCP for agent workflows, send a clear User-Agent, request gzip/deflate responses, pass `maxlag` to Action API fallback calls, and back off on `429 Too Many Requests`.
+
+## Run
+
+```bash
+pip install -r requirements.txt
+python -m src.app
+```
+
+The service listens on `http://127.0.0.1:5050`.
+
+## Response Shape
+
+```json
+{
+  "text": "Mango is not a fruit from a tree.",
+  "entities": [],
+  "relationships": [],
+  "rdf": "@prefix ...",
+  "llm": {}
+}
+```

@@ -1,66 +1,53 @@
-from flask import Blueprint, jsonify, request
-import requests
+from __future__ import annotations
 
-from ..application.services import KnowledgeGraphService
+import requests
+from flask import Blueprint, jsonify, request
+
+from ..application.services import HybridAgentService
 from ..domain.models import AnalyzeRequest
 
 
-def create_analyze_blueprint(service: KnowledgeGraphService) -> Blueprint:
+def create_analyze_blueprint(service: HybridAgentService) -> Blueprint:
     blueprint = Blueprint("analyze", __name__)
 
-    @blueprint.route("/health", methods=["GET"])
+    @blueprint.get("/health")
     def health() -> tuple:
         status = service.health()
-        http_status = 200 if status.get("wikidata", {}).get("status") == "ok" and status.get("llm", {}).get("status") == "ok" else 503
-        return jsonify(status), http_status
+        ok = all(part.get("status") == "ok" for part in status.values() if isinstance(part, dict))
+        return jsonify(status), 200 if ok else 503
 
-    @blueprint.route("/analyze", methods=["POST"])
+    @blueprint.post("/analyze")
     def analyze() -> tuple:
-        data = request.get_json(silent=True) or {}
-        text = data.get("text")
-        if not text:
+        payload = request.get_json(silent=True) or {}
+        text = payload.get("text")
+        if not isinstance(text, str) or not text.strip():
             return jsonify({"error": "Field 'text' is required."}), 400
-
-        prompt_name = data.get("prompt_name")
-        system_prompt_name = data.get("system_prompt_name")
-        top_k = data.get("top_k", 2)
-        max_hops = data.get("max_hops", 2)
-        hub_threshold = data.get("hub_threshold")
-        idempotence_key = data.get("idempotence_key")
-
-        try:
-            top_k = int(top_k)
-            max_hops = int(max_hops)
-            hub_threshold = int(hub_threshold) if hub_threshold is not None else None
-        except (TypeError, ValueError):
-            return jsonify({"error": "Numeric fields must be integers."}), 400
-
-        if top_k <= 0:
-            return jsonify({"error": "Field 'top_k' must be a positive integer."}), 400
-        if max_hops <= 0:
-            return jsonify({"error": "Field 'max_hops' must be a positive integer."}), 400
 
         try:
             response = service.analyze(
                 AnalyzeRequest(
-                    text=text,
-                    prompt_name=prompt_name,
-                    system_prompt_name=system_prompt_name,
-                    top_k=top_k,
-                    max_hops=max_hops,
-                    hub_threshold=hub_threshold,
-                    idempotence_key=idempotence_key,
+                    text=text.strip(),
+                    idempotence_key=payload.get("idempotence_key"),
                 )
             )
-        except FileNotFoundError as exc:
-            return jsonify({"error": str(exc)}), 404
+        except requests.Timeout as exc:
+            return (
+                jsonify(
+                    {
+                        "error": "External service request timed out.",
+                        "details": str(exc),
+                        "hint": "Increase OLLAMA_TIMEOUT_SECONDS or reduce OLLAMA_NUM_PREDICT if the timeout is from Ollama.",
+                    }
+                ),
+                504,
+            )
         except requests.RequestException as exc:
-            return jsonify({"error": "Failed to generate response from model.", "details": str(exc)}), 502
+            return jsonify({"error": "External service request failed.", "details": str(exc)}), 502
         except RuntimeError as exc:
             return jsonify({"error": str(exc)}), 502
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
 
-        return jsonify({"text": response.text, "rdf": response.rdf.turtle}), 200
+        return jsonify(response.to_dict()), 200
 
     return blueprint

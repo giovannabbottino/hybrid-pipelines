@@ -4,117 +4,51 @@ boundary ClientApp as Client
 
 box "Flask App" #EFEFEF
   control "Analyze Controller" as Controller
-  control "KnowledgeGraphService" as Service
-  entity "PromptRepository" as Repo
-  control "OllamaClient" as OC
-  control "WikidataGateway" as WD
-  control "RDFBuilder" as RDF
+  control "HybridAgentService" as Agent
+  control "OllamaClient" as LLM
+  control "WikidataMCPClient" as WD
 end box
 
-collections "Prompt files\n(prompt/)" as PromptFiles
-database "CSV log\n(OLLAMA_CSV_PATH)" as CSV
 database "Analyze event log\n(ANALYZE_LOG_PATH)" as EventLog
-database "RDF log\n(RDF_LOG_PATH)" as RDFLog
-database "Wikidata Action API\n(search + entity claims)" as WikidataAPI
-boundary "Ollama /api/generate" as OA
+database "Ollama CSV log\n(OLLAMA_CSV_PATH)" as CSV
+boundary "Ollama /api/generate" as Ollama
+boundary "Wikidata MCP\n(WIKIDATA_MCP_URL)" as MCP
 
 User -> Client: Request analysis
-Client -> Controller ++: POST /analyze {text, prompt_name?, system_prompt_name?, top_k?, max_hops?, hub_threshold?, idempotence_key?}
-note right of Controller
-payload example:
-{
-  "text": "Mango is not a fruit from a tree.",
-  "prompt_name": "prompts/ner-acm-ccs.txt",
-  "system_prompt_name": "system/knowledge_graph.txt"
-}
-end note
-Controller -> Controller: validate text present
-Controller -> Controller: validate numeric options
-Controller -> Service ++: build AnalyzeRequest
+Client -> Controller ++: POST /analyze {"text": "..."}
+Controller -> Controller: validate text
+Controller -> Agent ++: AnalyzeRequest(text)
 
-Service -> Repo ++: load system prompt
-Repo -> PromptFiles: read system prompt file
-Repo --> Service --: system prompt text
-Service -> Repo ++: load NER prompt
-Repo -> PromptFiles: read prompt template file
-Repo --> Service --: prompt template text
-Service -> Service: build NER message (${USER_TEXT} replace)
+Agent -> LLM ++: generate(entity extraction prompt)
+LLM -> Ollama ++: POST /api/generate
+Ollama --> LLM --: JSON response
+LLM -> CSV: append entity_extraction row
+LLM --> Agent --: entities JSON
 
-Service -> OC ++: generate(system, prompt, prompt_name=NER, input_text)
-note right of OC
-POST to Ollama with:
-- model: OLLAMA_MODEL
-- url: OLLAMA_API_URL/api/generate
-- options: OLLAMA_* knobs
-- stream: false
-end note
-OC -> OA ++: POST /api/generate {model, system, prompt, options, stream:false}
-OA --> OC --: JSON payload (response, timings, done_reason)
-
-OC -> CSV ++: append row (prompt_name, input_text, response, rdf flags)
-CSV --> OC --: logged
-OC --> Service --: NER generation payload (mentions JSON)
-
-Service -> Service: add heuristic mentions for missing common-noun concepts
-
-loop for each mention
-  Service -> WD ++: search_candidates(surface, top_k)
-  WD -> WikidataAPI: GET wbsearchentities
-  WikidataAPI --> WD --: candidate hits
-  WD --> Service --: candidate list
+loop each extracted entity
+  Agent -> WD ++: search_items(surface)
+  WD -> MCP ++: tools/call search_items
+  MCP --> WD --: candidate QIDs
+  Agent -> WD ++: get_statements(QID)
+  WD -> MCP ++: tools/call get_statements
+  MCP --> WD --: direct statements
+  WD --> Agent --: resolved entity evidence
 end
 
-note right of WD
-- direct Wikidata lookup
-- no local Neo4j required
-- shortest_path uses bounded Wikidata claim traversal
-end note
+Agent -> WD ++: find_relationships(resolved entities)
+WD --> Agent --: direct relationships among entities
 
-Service -> WD ++: shortest_path between candidate pairs
-WD -> WikidataAPI: GET wbgetentities (claims + labels)
-WikidataAPI --> WD --: entity claims
-WD --> Service --: path evidence or none
-
-alt path evidence found
-  Service -> Repo ++: load path-to-text prompt
-  Repo --> Service --: prompt
-  Service -> OC ++: generate(path-to-text)
-  OC -> OA ++: POST /api/generate
-  OA --> OC --: path sentences JSON
-  OC --> Service --: path sentences
-
-  Service -> Repo ++: load path-summary prompt
-  Repo --> Service --: prompt
-  Service -> OC ++: generate(path-summary)
-  OC -> OA ++: POST /api/generate
-  OA --> OC --: summary text
-  OC --> Service --: path summary
-else no path evidence
-  Service -> Service: continue with empty path summary
-end
-
-loop for each mention
-  Service -> Repo ++: load candidate-decision prompt
-  Repo --> Service --: prompt
-  Service -> OC ++: generate(candidate-decision)
-  OC -> OA ++: POST /api/generate
-  OA --> OC --: chosen entity JSON
-  OC --> Service --: decision payload
-end
-
-Service -> RDF ++: build RDF (doc + mentions + grounded entities + assertions)
-RDF --> Service --: Turtle + JSON-LD
-note right of RDF
-May add ex:Assertion nodes for patterns like:
-subject + copula + negation + object + context entity
-end note
+Agent -> LLM ++: generate(RDF prompt + text + Wikidata evidence)
+LLM -> Ollama ++: POST /api/generate
+Ollama --> LLM --: Turtle
+LLM -> CSV: append rdf_build row
+LLM --> Agent --: RDF/Turtle
 
 opt logging configured
-  Service -> EventLog: append grouped events by idempotence_key
-  Service -> RDFLog: append final RDF row
+  Agent -> EventLog: append grouped events by idempotence_key
 end
 
-Service --> Controller --: AnalyzeResponse
-Controller --> Client --: 200 {text, rdf}
+Agent --> Controller --: AnalyzeResponse
+Controller --> Client --: 200 {text, entities, relationships, rdf, llm}
 Client --> User: Show result
 @enduml
