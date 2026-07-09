@@ -3,7 +3,7 @@ from __future__ import annotations
 import requests
 from flask import Blueprint, jsonify, request
 
-from ..application.services import HybridAgentService
+from ..application.services import HybridAgentService, RDFValidationError
 from ..domain.models import AnalyzeRequest
 
 
@@ -28,6 +28,7 @@ def create_analyze_blueprint(service: HybridAgentService) -> Blueprint:
                 AnalyzeRequest(
                     text=text.strip(),
                     idempotence_key=payload.get("idempotence_key"),
+                    max_rdf_attempts=payload.get("max_rdf_attempts", 3),
                 )
             )
         except requests.Timeout as exc:
@@ -43,6 +44,8 @@ def create_analyze_blueprint(service: HybridAgentService) -> Blueprint:
             )
         except requests.RequestException as exc:
             return jsonify({"error": "External service request failed.", "details": str(exc)}), 502
+        except RDFValidationError as exc:
+            return jsonify({"error": "rdf parse errror", "attempts": exc.attempts, "details": exc.last_error}), 508
         except RuntimeError as exc:
             return jsonify({"error": str(exc)}), 502
         except ValueError as exc:

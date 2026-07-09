@@ -8,6 +8,7 @@ from typing import Any
 class AnalyzeRequest:
     text: str
     idempotence_key: str | None = None
+    max_rdf_attempts: int = 3
 
 
 @dataclass(frozen=True)

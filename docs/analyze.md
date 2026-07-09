@@ -1,50 +1,118 @@
 # Analyze
 
-`POST /analyze` triggers the Wikidata agent.
+## `GET /health`
 
-## Request
+Checks the two external dependencies used by the agent:
+
+- `llm` - Ollama `/api/tags`
+- `wikidata_mcp` - Wikidata lookup through the configured MCP endpoint
+
+The endpoint returns `200` when every dependency reports `status: ok`; otherwise it returns `503`.
+
+Example response:
+
+```json
+{
+  "llm": {
+    "status": "ok",
+    "model": "llama3:8b"
+  },
+  "wikidata_mcp": {
+    "status": "ok",
+    "url": "https://wd-mcp.wmcloud.org/mcp/"
+  }
+}
+```
+
+## `POST /analyze`
+
+Runs the hybrid Wikidata-grounded knowledge graph pipeline.
+
+### Request body
 
 ```json
 {
   "text": "Mango is not a fruit from a tree.",
-  "idempotence_key": "optional"
+  "idempotence_key": "optional-stable-key",
+  "max_rdf_attempts": 3
 }
 ```
 
-## Behavior
+Fields:
 
-1. The LLM extracts entity and concept mentions.
-2. The service resolves each mention through the configured Wikidata MCP `search_items` tool.
-3. The service fetches structural information through the Wikidata MCP `get_statements` tool.
-4. Direct relationships among resolved entities are retained as evidence.
-5. The LLM receives the text, resolved entities, and relationships, then returns RDF/Turtle.
+| Field | Required | Description |
+|-------|----------|-------------|
+| `text` | Yes | Source text to analyze. Leading and trailing whitespace is stripped. |
+| `idempotence_key` | No | Stable key used to group events in `ANALYZE_LOG_PATH`. If omitted, the service generates a UUID. |
+| `max_rdf_attempts` | No | Number of RDF generation/repair attempts, clamped from 1 to 3. Defaults to 3. |
 
-## Response
+### Behavior
+
+1. Load the system prompt and entity extraction prompt.
+2. Replace `${TEXT}` with the request text.
+3. Ask the LLM to return strict JSON with entity/concept mentions.
+4. Parse the JSON response, recover JSON embedded in prose when possible, and ignore invalid extraction output.
+5. Add heuristic mentions from non-stopword tokens in the input text.
+6. Deduplicate mentions and keep at most 10.
+7. Resolve mentions through Wikidata MCP `search_items`; when enabled, merge candidates from the Wikidata Action API fallback.
+8. Fetch statements for resolved entities through MCP `get_statements`; when enabled, use the Action API fallback if MCP fails.
+9. Keep direct relationships where an entity statement points to another resolved entity.
+10. Load the RDF build prompt, inject a JSON payload with text, source attribution, compact entities, and relationships.
+11. Ask the LLM to return RDF/Turtle and strip code fences or trailing notes when present.
+12. Validate the RDF with `rdflib.Graph.parse(format="turtle")`, trying minor repairs and retrying the model with parser feedback when needed.
+13. Return the analysis response and write request events/LLM CSV logs when configured.
+
+### Success response
 
 ```json
 {
   "text": "Mango is not a fruit from a tree.",
   "entities": [
     {
-      "mention": {"surface": "Mango", "start": 0, "end": 5},
-      "id": "Q...",
-      "iri": "http://www.wikidata.org/entity/Q...",
-      "label": "Mango",
-      "description": "...",
+      "mention": {
+        "surface": "Mango",
+        "start": 0,
+        "end": 5,
+        "entity_type": "Entity",
+        "confidence": 0.2
+      },
+      "id": "Q3919027",
+      "iri": "http://www.wikidata.org/entity/Q3919027",
+      "label": "mango",
+      "description": "edible stone fruit of Mangifera",
       "score": 1.0,
       "statements": []
     }
   ],
   "relationships": [
     {
-      "subject_id": "Q...",
-      "property_id": "P...",
-      "object_id": "Q..."
+      "subject_id": "Q3919027",
+      "subject_label": "mango",
+      "property_id": "P31",
+      "property_label": "instance of",
+      "object_id": "Q3314483",
+      "object_label": "fruit",
+      "source": "wikidata"
     }
   ],
-  "rdf": "@prefix ex: <http://example.org/hybrid/> .",
+  "rdf": "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n@prefix wd: <http://www.wikidata.org/entity/> .\n@prefix kg: <https://example.org/wikidata-description/> .\n...",
+  "source_attribution": "Source: Wikidata",
   "llm": {
-    "entity_extraction": "{}"
+    "entity_extraction": "{\"entities\": []}"
   }
 }
 ```
+
+### Error responses
+
+| Status | Cause | Response shape |
+|--------|-------|----------------|
+| `400` | Missing or blank `text`, or invalid local prompt path | `{ "error": "..." }` |
+| `502` | External service request failed, model request failed, or runtime generation error | `{ "error": "...", "details": "..." }` |
+| `508` | The model did not return valid Turtle RDF after the configured attempts | `{ "error": "rdf parse errror", "attempts": 3, "details": "..." }` |
+| `504` | External service timeout | `{ "error": "External service request timed out.", "details": "...", "hint": "..." }` |
+
+## Logs
+
+- Ollama generations are written to `OLLAMA_CSV_PATH` with `stage`, `model`, `prompt`, `response`, `created_at`, `done`, and `total_duration`.
+- Agent events are written to `ANALYZE_LOG_PATH` when configured. Events share the provided or generated `idempotence_key`.

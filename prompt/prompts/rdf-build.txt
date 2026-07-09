@@ -19,7 +19,11 @@ Requirements:
 - Use @prefix kg: <https://example.org/wikidata-description/> .
 - Create triples directly from the main resolved entity to entities identified in the description/text.
 - Use rdfs:label for every wd:Q... entity that appears in the graph.
+- Use rdfs:label for every kg: generated entity, concept, class, place, person, organization, event, and object that appears as a subject or object.
+- Prefer entity-to-entity triples over literal-only descriptions so downstream SPARQL can traverse from a subject label to an answer label.
 - Use kg:is for "entity is description entity" relationships.
+- Use kg:is for type, class, category, or "instance of" relationships unless a more specific provided Wikidata relationship is directly supported.
+- Prefer this predicate vocabulary when it fits the text: kg:is, kg:of, kg:from, kg:in, kg:on, kg:to, kg:with, kg:has_part, kg:part_of, kg:located_in, kg:instance_of.
 - Use kg:of, kg:from, kg:in, kg:on, kg:to, or kg:with when the input text contains those relationship words between resolved entities.
 - If the sentence expresses negation, add kg:negated true on the main entity.
 - Do not invent Wikidata QIDs. Only use QIDs from the provided entities or relationships.

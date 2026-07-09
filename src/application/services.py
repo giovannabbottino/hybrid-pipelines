@@ -5,11 +5,20 @@ import re
 from typing import Any
 from uuid import uuid4
 
+from rdflib import Graph
+
 from ..domain.models import AnalyzeRequest, AnalyzeResponse, EntityMention
 from ..infrastructure.ollama_client import OllamaClient
 from ..infrastructure.prompt_repository import PromptRepository
 from ..infrastructure.request_logger import RequestLogger
 from ..infrastructure.wikidata_client import WikidataMCPClient
+
+
+class RDFValidationError(RuntimeError):
+    def __init__(self, message: str, attempts: int, last_error: str | None = None) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.last_error = last_error
 
 
 class HybridAgentService:
@@ -44,7 +53,7 @@ class HybridAgentService:
         relationships = self.wikidata.find_relationships(entities)
         self._log(key, "wikidata_relationships", {"relationships": [rel.to_dict() for rel in relationships]})
 
-        rdf = self._build_rdf(request.text, entities, relationships, key)
+        rdf = self._build_valid_rdf(request.text, entities, relationships, key, getattr(request, "max_rdf_attempts", 3))
         self._log(key, "rdf_built", {"rdf": rdf})
 
         return AnalyzeResponse(
@@ -76,8 +85,32 @@ class HybridAgentService:
         mentions = [*mentions, *_heuristic_mentions(text)]
         return _dedupe_mentions(mentions)[:10], raw
 
-    def _build_rdf(self, text: str, entities: list, relationships: list, key: str) -> str:
-        system_prompt = self.prompt_repository.load_prompt(self.system_prompt_name)
+    def _build_valid_rdf(self, text: str, entities: list, relationships: list, key: str, max_attempts: int) -> str:
+        attempts = max(1, min(int(max_attempts or 3), 3))
+        prompt = self._build_rdf_prompt(text, entities, relationships)
+        last_error = None
+
+        for attempt in range(1, attempts + 1):
+            rdf = self._build_rdf(prompt, key)
+            for repair_method, candidate_rdf in _rdf_repair_candidates(rdf):
+                try:
+                    _parse_rdf(candidate_rdf)
+                    self._log(
+                        key,
+                        "rdf_validated",
+                        {"attempt": attempt, "repair_method": repair_method},
+                    )
+                    return candidate_rdf
+                except Exception as exc:  # rdflib raises parser-specific exception classes.
+                    last_error = str(exc)
+
+            if attempt == attempts:
+                break
+            prompt = _build_retry_prompt(prompt, rdf, last_error or "Invalid Turtle RDF.")
+
+        raise RDFValidationError("rdf parse errror", attempts=attempts, last_error=last_error)
+
+    def _build_rdf_prompt(self, text: str, entities: list, relationships: list) -> str:
         prompt_template = self.prompt_repository.load_prompt(self.rdf_prompt_name)
         payload = {
             "text": text,
@@ -85,7 +118,10 @@ class HybridAgentService:
             "entities": [_compact_entity(entity) for entity in entities],
             "relationships": [relationship.to_dict() for relationship in relationships],
         }
-        prompt = prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
+        return prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
+
+    def _build_rdf(self, prompt: str, key: str) -> str:
+        system_prompt = self.prompt_repository.load_prompt(self.system_prompt_name)
         self._log(key, "llm_rdf_request", {"prompt": prompt})
         rdf = self.llm.generate(system_prompt=system_prompt, prompt=prompt, stage="rdf_build").strip()
         self._log(key, "llm_rdf_response", {"response": rdf})
@@ -185,3 +221,57 @@ def _strip_code_fence(text: str) -> str:
     if note_match:
         cleaned = cleaned[: note_match.start()].strip()
     return cleaned.strip()
+
+
+def _parse_rdf(rdf_text: str) -> None:
+    if not rdf_text.strip():
+        raise ValueError("Empty RDF response.")
+    Graph().parse(data=rdf_text, format="turtle")
+
+
+def _rdf_repair_candidates(rdf_text: str):
+    raw = (rdf_text or "").strip().replace("\r\n", "\n").replace("\r", "\n")
+    raw = raw.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
+    raw = re.sub(r'""([^"\n]+)""', r'"\1"', raw)
+
+    seen = set()
+
+    def emit(method: str, value: str):
+        value = (value or "").strip()
+        if not value or value in seen:
+            return
+        seen.add(value)
+        yield method, value
+
+    yield from emit("trim", raw)
+
+    if raw and not raw.endswith("."):
+        yield from emit("append_final_dot", raw + " .")
+
+    lines = raw.splitlines()
+    last_complete_line = None
+    for idx, line in enumerate(lines):
+        if line.strip().endswith("."):
+            last_complete_line = idx
+    if last_complete_line is not None:
+        yield from emit("keep_through_last_complete_statement", "\n".join(lines[: last_complete_line + 1]))
+
+    blocks = re.split(r"\n\s*\n", raw)
+    while len(blocks) > 1:
+        blocks = blocks[:-1]
+        candidate = "\n\n".join(blocks).strip()
+        if candidate and not candidate.endswith("."):
+            candidate += " ."
+        yield from emit("drop_incomplete_last_block", candidate)
+
+
+def _build_retry_prompt(original_prompt: str, invalid_rdf: str, parser_error: str) -> str:
+    error = parser_error[:1200]
+    previous = invalid_rdf[:6000]
+    return (
+        f"{original_prompt}\n\n"
+        "The previous answer was not valid Turtle RDF when parsed with rdflib Graph.parse.\n"
+        f"Parser error:\n{error}\n\n"
+        "Return only corrected valid Turtle RDF. Do not include markdown fences, comments, or explanations.\n"
+        f"Previous invalid RDF:\n{previous}"
+    )

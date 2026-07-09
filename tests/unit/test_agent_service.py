@@ -74,6 +74,55 @@ def test_agent_extracts_entities_resolves_wikidata_and_builds_rdf():
     assert response.rdf.startswith("@prefix")
 
 
+def test_agent_retries_until_rdf_is_valid():
+    class RetryLLM(StubLLM):
+        def __init__(self):
+            super().__init__()
+            self.rdf_responses = [
+                "not rdf",
+                "@prefix ex: <http://example.org/hybrid/> .\nex:doc ex:mentions ex:mango .",
+            ]
+
+        def generate(self, system_prompt: str, prompt: str, stage: str) -> str:
+            if stage == "rdf_build":
+                self.calls.append({"system_prompt": system_prompt, "prompt": prompt, "stage": stage})
+                return self.rdf_responses.pop(0)
+            return super().generate(system_prompt, prompt, stage)
+
+    llm = RetryLLM()
+    service = HybridAgentService(llm=llm, wikidata=StubWikidata(), prompt_repository=StubPromptRepository())
+
+    response = service.analyze(
+        type("Request", (), {"text": "Mango is not a fruit from a tree.", "idempotence_key": None, "max_rdf_attempts": 3})()
+    )
+
+    rdf_prompts = [call["prompt"] for call in llm.calls if call["stage"] == "rdf_build"]
+    assert response.rdf == "@prefix ex: <http://example.org/hybrid/> .\nex:doc ex:mentions ex:mango ."
+    assert len(rdf_prompts) == 2
+    assert "previous answer was not valid Turtle RDF" in rdf_prompts[1]
+
+
+def test_agent_repairs_doubled_literal_quotes():
+    class QuoteRepairLLM(StubLLM):
+        def generate(self, system_prompt: str, prompt: str, stage: str) -> str:
+            if stage == "rdf_build":
+                return (
+                    "@prefix ex: <http://example.org/hybrid/> .\n"
+                    "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
+                    'ex:mango rdfs:label ""Mango"" .'
+                )
+            return super().generate(system_prompt, prompt, stage)
+
+    service = HybridAgentService(llm=QuoteRepairLLM(), wikidata=StubWikidata(), prompt_repository=StubPromptRepository())
+
+    response = service.analyze(
+        type("Request", (), {"text": "Mango is not a fruit from a tree.", "idempotence_key": None, "max_rdf_attempts": 3})()
+    )
+
+    assert '""Mango""' not in response.rdf
+    assert '"Mango"' in response.rdf
+
+
 def test_rdf_sanitizer_keeps_only_turtle_from_prose_and_fence():
     raw = """Here is the Turtle representation:
 

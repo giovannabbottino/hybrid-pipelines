@@ -1,36 +1,62 @@
 # Hybrid Pipelines Wikidata Agent
 
-Flask API that exposes a single agent endpoint:
+Flask API that builds a knowledge graph by combining LLM prompts with Wikidata evidence. The service extracts entity mentions from input text, resolves them through Wikidata MCP or the Wikidata Action API fallback, finds direct relationships among resolved entities, and asks the LLM to generate RDF/Turtle.
 
-```bash
-curl -X POST http://127.0.0.1:5050/analyze \
-  -H "Content-Type: application/json" \
-  -d "{\"text\":\"Mango is not a fruit from a tree.\"}"
-```
+## Flow
 
-The agent flow is intentionally simple:
+1. The LLM extracts entity and concept mentions from the input text.
+2. The service adds lightweight heuristic mentions from the text and deduplicates them.
+3. Each mention is resolved to Wikidata candidates, limited by `WIKIDATA_CANDIDATE_LIMIT`.
+4. Statements for resolved entities are fetched from Wikidata.
+5. Direct relationships among resolved entities are retained as evidence.
+6. The LLM receives the text, compact entity evidence, and relationships, then returns RDF/Turtle.
+7. The RDF is cleaned, validated with `rdflib`, and retried or lightly repaired before being returned.
 
-1. Use the LLM to extract entities and concepts from the input text.
-2. Use the configured Wikidata MCP server to search and inspect those entities.
-3. Find direct Wikidata relationships between the resolved entities.
-4. Ask the LLM to build RDF/Turtle from the text and Wikidata evidence.
+## Project Layout
 
-## Configuration
+- `src/` - Flask API with controller, application, domain, and infrastructure layers.
+- `prompt/system/` - System prompt for the Wikidata-grounded agent.
+- `prompt/prompts/` - Task prompts for entity extraction and RDF construction.
+- `docs/` - Endpoint, run, test, prompt, and sequence documentation.
+- `tests/` - Unit tests for service behavior and prompt constraints.
 
-The Wikidata MCP server is configured with:
+## API Summary
+
+### `GET /health`
+
+Checks Ollama and Wikidata availability. Returns `200` only when all checked parts report `status: ok`; otherwise returns `503`.
+
+### `POST /analyze`
+
+Request:
 
 ```json
 {
-  "mcpServers": {
-    "wikidata": {
-      "type": "streamable_http",
-      "url": "https://wd-mcp.wmcloud.org/mcp/"
-    }
+  "text": "Mango is not a fruit from a tree.",
+  "idempotence_key": "optional-stable-key",
+  "max_rdf_attempts": 3
+}
+```
+
+Response:
+
+```json
+{
+  "text": "Mango is not a fruit from a tree.",
+  "entities": [],
+  "relationships": [],
+  "rdf": "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n...",
+  "source_attribution": "Source: Wikidata",
+  "llm": {
+    "entity_extraction": "{\"entities\": []}"
   }
 }
 ```
 
-The API uses the same endpoint through environment variables:
+See [docs/analyze.md](docs/analyze.md) for the full endpoint contract.
+See [docs/prompt.md](docs/prompt.md) for the prompt structure and editing guidelines.
+
+## Configuration
 
 | Variable | Default |
 |---|---|
@@ -40,6 +66,7 @@ The API uses the same endpoint through environment variables:
 | `WIKIDATA_MCP_URL` | `https://wd-mcp.wmcloud.org/mcp/` |
 | `WIKIDATA_LANGUAGE` | `en` |
 | `WIKIDATA_TIMEOUT_SECONDS` | `60` |
+| `WIKIDATA_ACTION_API_URL` | `https://www.wikidata.org/w/api.php` |
 | `WIKIDATA_CANDIDATE_LIMIT` | `3` |
 | `WIKIDATA_ALLOW_ACTION_API_FALLBACK` | `true` |
 | `WIKIDATA_USER_AGENT` | `hybrid-pipelines-agent/1.0` |
@@ -52,9 +79,7 @@ The API uses the same endpoint through environment variables:
 | `OLLAMA_TIMEOUT_SECONDS` | `300` |
 | `ANALYZE_LOG_PATH` | `data/analyze_log.jsonl` |
 
-Prompt files live under `prompt/`. Keep reusable task prompts in `prompt/prompts/` and system prompts in `prompt/system/`.
-
-Wikidata access follows the public access guidance: use Wikidata MCP for agent workflows, send a clear User-Agent, request gzip/deflate responses, pass `maxlag` to Action API fallback calls, and back off on `429 Too Many Requests`.
+Optional Ollama generation options are also supported: `OLLAMA_SEED`, `OLLAMA_TEMPERATURE`, `OLLAMA_TOP_K`, `OLLAMA_TOP_P`, `OLLAMA_MIN_P`, `OLLAMA_STOP`, `OLLAMA_NUM_CTX`, and `OLLAMA_NUM_PREDICT`.
 
 ## Run
 
@@ -65,14 +90,4 @@ python -m src.app
 
 The service listens on `http://127.0.0.1:5050`.
 
-## Response Shape
-
-```json
-{
-  "text": "Mango is not a fruit from a tree.",
-  "entities": [],
-  "relationships": [],
-  "rdf": "@prefix ...",
-  "llm": {}
-}
-```
+See [docs/how-to-run.md](docs/how-to-run.md) for Docker Compose and local setup details.
