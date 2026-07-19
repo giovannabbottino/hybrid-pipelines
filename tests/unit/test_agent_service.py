@@ -155,7 +155,12 @@ def test_agent_retries_when_rdf_has_only_prefixes():
     )
 
     rdf_prompts = [call["prompt"] for call in llm.calls if call["stage"] == "rdf_build"]
-    assert response.rdf == "@prefix ex: <http://example.org/hybrid/> .\nex:doc ex:mentions ex:mango ."
+    assert response.rdf == (
+        "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
+        "@prefix wd: <http://www.wikidata.org/entity/> .\n"
+        "@prefix kg: <https://example.org/wikidata-description/> .\n"
+        'wd:Q1054564 rdfs:label "Mango" .'
+    )
     assert len(rdf_prompts) == 2
     assert "RDF response contains no triples." in rdf_prompts[1]
 
