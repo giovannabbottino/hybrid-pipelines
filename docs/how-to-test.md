@@ -1,18 +1,45 @@
 # How to test
 
-Tests are organized by scope:
-- `tests/unit/` for service and RDF-building behavior
-- `tests/controllers/` for Flask blueprints using a test client with stubbed dependencies
-- `tests/infrastructure/` for the Ollama client and CSV logger
-- `tests/integration/` for end-to-end request flows through the app factory with mocked Wikidata/Ollama calls
+Tests are organized under `tests/unit/`.
 
-## Running tests
+- `test_agent_service.py` covers service orchestration, entity extraction parsing, Wikidata resolution calls, relationship handling, RDF build prompting, and response shape.
+- `test_prompts.py` checks important RDF prompt constraints such as required prefixes and no undeclared `ex:` prefix.
+
+## Run all tests
+
+Run commands from `hybrid-pipelines/`.
 
 ```bash
 python -m pytest
 ```
 
+## Run focused tests
+
+```bash
+python -m pytest tests/unit/test_agent_service.py
+python -m pytest tests/unit/test_prompts.py
+```
+
+## Continuous integration
+
+GitHub Actions runs `.github/workflows/ci.yml` for every push, pull request, and manual dispatch. The workflow:
+
+- runs Ruff and Pyright on Python 3.13;
+- runs the test suite on Python 3.10 and 3.13;
+- caches downloaded pip packages;
+- cancels an older run when a newer commit is pushed to the same branch.
+
+Run the same checks locally with:
+
+```bash
+python -m pip install -e ".[test,lint]"
+python -m ruff check .
+python -m pyright
+python -m pytest
+```
+
 ## Notes
 
-- The automated tests do not require Ollama or live Wikidata MCP access.
-- Tests stub the LLM and Wikidata client where external calls would normally happen.
+- The project uses the standard `src` layout. Tests use `pythonpath = src` from `pytest.ini`, so run them from the repository root.
+- Pytest writes temporary files under `.pytest-runtime` through the configured `--basetemp`.
+- The automated tests do not require Ollama or live Wikidata access; external services are stubbed.

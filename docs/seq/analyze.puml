@@ -5,50 +5,78 @@ boundary ClientApp as Client
 box "Flask App" #EFEFEF
   control "Analyze Controller" as Controller
   control "HybridAgentService" as Agent
+  entity "PromptRepository" as Repo
   control "OllamaClient" as LLM
   control "WikidataMCPClient" as WD
 end box
 
+collections "Prompt files\n(prompt/)" as PromptFiles
 database "Analyze event log\n(ANALYZE_LOG_PATH)" as EventLog
 database "Ollama CSV log\n(OLLAMA_CSV_PATH)" as CSV
 boundary "Ollama /api/generate" as Ollama
-boundary "Wikidata MCP\n(WIKIDATA_MCP_URL)" as MCP
+boundary "Wikidata MCP / Action API" as Wikidata
 
 User -> Client: Request analysis
-Client -> Controller ++: POST /analyze {"text": "..."}
-Controller -> Controller: validate text
-Controller -> Agent ++: AnalyzeRequest(text)
+Client -> Controller ++: POST /analyze {"text": "...", "idempotence_key": "..."}
+Controller -> Controller: validate and trim text
+Controller -> Agent ++: AnalyzeRequest(text, idempotence_key)
 
-Agent -> LLM ++: generate(entity extraction prompt)
-LLM -> Ollama ++: POST /api/generate
-Ollama --> LLM --: JSON response
+Agent -> EventLog: append analyze_started
+
+Agent -> Repo ++: load system prompt
+Repo -> PromptFiles: read system/agent.txt
+Repo --> Agent --: system prompt text
+
+Agent -> Repo ++: load entity extraction prompt
+Repo -> PromptFiles: read prompts/entity-extraction.txt
+Repo --> Agent --: entity prompt template
+
+Agent -> Agent: replace ${TEXT} with input text
+Agent -> EventLog: append llm_entity_request
+
+Agent -> LLM ++: generate(system_prompt, entity_prompt, stage="entity_extraction")
+LLM -> Ollama ++: POST /api/generate {model, system, prompt, stream:false}
+Ollama --> LLM --: JSON payload with extraction text
 LLM -> CSV: append entity_extraction row
-LLM --> Agent --: entities JSON
+LLM --> Agent --: raw entity extraction JSON
 
-loop each extracted entity
-  Agent -> WD ++: search_items(surface)
-  WD -> MCP ++: tools/call search_items
-  MCP --> WD --: candidate QIDs
-  Agent -> WD ++: get_statements(QID)
-  WD -> MCP ++: tools/call get_statements
-  MCP --> WD --: direct statements
-  WD --> Agent --: resolved entity evidence
+Agent -> EventLog: append llm_entity_response
+Agent -> Agent: parse JSON, add heuristic mentions, dedupe, keep up to 10
+
+loop each mention
+  Agent -> WD ++: resolve entity mention
+  WD -> Wikidata ++: search_items / Action API search
+  Wikidata --> WD --: candidate entities
+  WD -> Wikidata ++: get_statements / Action API claims
+  Wikidata --> WD --: statements
+  WD --> Agent --: resolved WikidataEntity
 end
+
+Agent -> EventLog: append wikidata_entities
 
 Agent -> WD ++: find_relationships(resolved entities)
-WD --> Agent --: direct relationships among entities
+WD --> Agent --: direct relationships among resolved entities
+Agent -> EventLog: append wikidata_relationships
 
-Agent -> LLM ++: generate(RDF prompt + text + Wikidata evidence)
-LLM -> Ollama ++: POST /api/generate
-Ollama --> LLM --: Turtle
+Agent -> Repo ++: load RDF build prompt
+Repo -> PromptFiles: read prompts/rdf-build.txt
+Repo --> Agent --: RDF prompt template
+
+Agent -> Agent: build payload with text, Source: Wikidata, entities, relationships
+Agent -> Agent: replace ${PAYLOAD} with JSON payload
+Agent -> EventLog: append llm_rdf_request
+
+Agent -> LLM ++: generate(system_prompt, rdf_prompt, stage="rdf_build")
+LLM -> Ollama ++: POST /api/generate {model, system, prompt, stream:false}
+Ollama --> LLM --: JSON payload with Turtle response
 LLM -> CSV: append rdf_build row
-LLM --> Agent --: RDF/Turtle
+LLM --> Agent --: RDF/Turtle text
 
-opt logging configured
-  Agent -> EventLog: append grouped events by idempotence_key
-end
+Agent -> Agent: strip code fences and trailing notes
+Agent -> EventLog: append rdf_built
 
 Agent --> Controller --: AnalyzeResponse
-Controller --> Client --: 200 {text, entities, relationships, rdf, llm}
+Controller --> Client --: 200 {text, entities, relationships, rdf, source_attribution, llm}
 Client --> User: Show result
+
 @enduml

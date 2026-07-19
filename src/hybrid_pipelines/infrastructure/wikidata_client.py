@@ -5,6 +5,7 @@ import json
 import os
 import re
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -26,7 +27,7 @@ class WikidataMCPConfig:
     retry_backoff_seconds: float = 2.0
 
     @classmethod
-    def from_env(cls) -> "WikidataMCPConfig":
+    def from_env(cls) -> WikidataMCPConfig:
         return cls(
             url=os.getenv("WIKIDATA_MCP_URL", "https://wd-mcp.wmcloud.org/mcp/"),
             language=os.getenv("WIKIDATA_LANGUAGE", "en"),
@@ -63,7 +64,12 @@ class WikidataMCPClient:
         except requests.RequestException as exc:
             return {"status": "unavailable", "details": str(exc)}
 
-    def resolve_entities(self, mentions: list[EntityMention], limit: int = 3, context: str | None = None) -> list[WikidataEntity]:
+    def resolve_entities(
+        self,
+        mentions: list[EntityMention],
+        limit: int = 3,
+        context: str | None = None,
+    ) -> list[WikidataEntity]:
         entities: list[WikidataEntity] = []
         for mention in mentions:
             query = _contextual_query(mention.surface, context or "")
@@ -179,14 +185,20 @@ class WikidataMCPClient:
         data, response = self._post_jsonrpc(payload, initialize=True)
         if "error" in data:
             raise requests.RequestException(str(data["error"]))
-        self._session_id = response.headers.get("Mcp-Session-Id") or response.headers.get("mcp-session-id") or self._session_id
+        self._session_id = (
+            response.headers.get("Mcp-Session-Id")
+            or response.headers.get("mcp-session-id")
+            or self._session_id
+        )
         self._initialized = True
-        try:
+        with suppress(requests.RequestException):
             self._post_jsonrpc({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        except requests.RequestException:
-            pass
 
-    def _post_jsonrpc(self, payload: dict[str, Any], initialize: bool = False) -> tuple[dict[str, Any], requests.Response]:
+    def _post_jsonrpc(
+        self,
+        payload: dict[str, Any],
+        initialize: bool = False,
+    ) -> tuple[dict[str, Any], requests.Response]:
         headers = {
             "Accept": "application/json, text/event-stream",
             "Accept-Encoding": "gzip, deflate",

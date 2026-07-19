@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
-from os import PathLike
 from datetime import datetime, timezone
+from os import PathLike
 from pathlib import Path
 from typing import Any
 

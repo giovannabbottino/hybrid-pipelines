@@ -42,7 +42,7 @@ class OllamaClientConfig:
     options: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_env(cls) -> "OllamaClientConfig":
+    def from_env(cls) -> OllamaClientConfig:
         options: dict[str, Any] = {}
         for key, env_name, reader in (
             ("seed", "OLLAMA_SEED", _int_env),
@@ -74,7 +74,7 @@ class OllamaClient:
         self.config = config
         self._logging_disabled = False
 
-    def generate(self, system_prompt: str, prompt: str, stage: str) -> str:
+    def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds: float | None = None) -> str:
         base_url = self.config.url.rstrip("/")
         target_url = base_url if base_url.endswith("/api/generate") else f"{base_url}/api/generate"
         payload: dict[str, Any] = {
@@ -86,7 +86,8 @@ class OllamaClient:
         if self.config.options:
             payload["options"] = self.config.options
 
-        response = requests.post(target_url, json=payload, timeout=self.config.timeout_seconds)
+        timeout = timeout_seconds if timeout_seconds is not None else self.config.timeout_seconds
+        response = requests.post(target_url, json=payload, timeout=timeout)
         response.raise_for_status()
         data = response.json()
         text = str(data.get("response") or "")

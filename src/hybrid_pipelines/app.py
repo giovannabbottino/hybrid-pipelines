@@ -29,6 +29,9 @@ def create_app() -> Flask:
     analyze_log_path = os.getenv("ANALYZE_LOG_PATH", "data/analyze_log.jsonl")
     request_logger = RequestLogger(Path(analyze_log_path)) if analyze_log_path else None
     candidate_limit = _int_env("WIKIDATA_CANDIDATE_LIMIT", 3)
+    analyze_timeout_seconds = _float_env("ANALYZE_TIMEOUT_SECONDS", 540.0)
+    llm_entity_extraction_enabled = _bool_env("LLM_ENTITY_EXTRACTION_ENABLED", True)
+    mention_limit = _int_env("ENTITY_MENTION_LIMIT", 10)
 
     service = HybridAgentService(
         llm=llm,
@@ -39,6 +42,9 @@ def create_app() -> Flask:
         rdf_prompt_name=os.getenv("RDF_BUILD_PROMPT_NAME", "prompts/rdf-build.txt"),
         request_logger=request_logger,
         candidate_limit=candidate_limit,
+        analyze_timeout_seconds=analyze_timeout_seconds,
+        llm_entity_extraction_enabled=llm_entity_extraction_enabled,
+        mention_limit=mention_limit,
     )
     app.register_blueprint(create_analyze_blueprint(service))
     return app
@@ -54,5 +60,26 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
-if __name__ == "__main__":
+def _float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value in (None, ""):
+        return default
+    return value.strip().casefold() in {"1", "true", "yes", "on"}
+
+
+def main() -> None:
     create_app().run(host="127.0.0.1", port=5050, debug=True)
+
+
+if __name__ == "__main__":
+    main()
