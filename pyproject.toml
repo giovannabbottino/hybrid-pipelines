@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hybrid-pipelines"
+version = "1.0.0"
+description = "Wikidata-grounded knowledge graph pipeline using Ollama."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "Flask==3.0.0",
+    "python-dotenv==1.0.1",
+    "rdflib==7.1.1",
+    "requests==2.31.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest==7.4.4"]
+lint = [
+    "pyright>=1.1.400,<2",
+    "ruff>=0.12,<1",
+]
+
+[project.scripts]
+hybrid-pipelines = "hybrid_pipelines.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pyright]
+include = ["src", "tests"]
+extraPaths = ["src"]
+pythonVersion = "3.10"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
