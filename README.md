@@ -14,7 +14,7 @@ Flask API that builds a knowledge graph by combining LLM prompts with Wikidata e
 
 ## Project Layout
 
-- `src/` - Flask API with controller, application, domain, and infrastructure layers.
+- `src/hybrid_pipelines/` - importable application package, organized into controller, application, domain, and infrastructure layers.
 - `prompt/system/` - System prompt for the Wikidata-grounded agent.
 - `prompt/prompts/` - Task prompts for entity extraction and RDF construction.
 - `docs/` - Endpoint, run, test, prompt, and sequence documentation.
@@ -34,7 +34,7 @@ Request:
 {
   "text": "Mango is not a fruit from a tree.",
   "idempotence_key": "optional-stable-key",
-  "max_rdf_attempts": 3
+  "max_rdf_attempts": 1
 }
 ```
 
@@ -77,15 +77,30 @@ See [docs/prompt.md](docs/prompt.md) for the prompt structure and editing guidel
 | `OLLAMA_MODEL` | `llama3:8b` |
 | `OLLAMA_CSV_PATH` | `data/ollama_responses.csv` |
 | `OLLAMA_TIMEOUT_SECONDS` | `300` |
+| `LLM_ENTITY_EXTRACTION_ENABLED` | `true` (set to `false` to use heuristic extraction and save one LLM call) |
+| `ENTITY_MENTION_LIMIT` | `10` (lower values reduce sequential Wikidata lookups) |
 | `ANALYZE_LOG_PATH` | `data/analyze_log.jsonl` |
 
 Optional Ollama generation options are also supported: `OLLAMA_SEED`, `OLLAMA_TEMPERATURE`, `OLLAMA_TOP_K`, `OLLAMA_TOP_P`, `OLLAMA_MIN_P`, `OLLAMA_STOP`, `OLLAMA_NUM_CTX`, and `OLLAMA_NUM_PREDICT`.
 
+### Low-latency profile
+
+The checked-in `.env` keeps entity extraction with the LLM while reducing generation and Wikidata work:
+
+```env
+LLM_ENTITY_EXTRACTION_ENABLED=true
+ENTITY_MENTION_LIMIT=3
+OLLAMA_NUM_PREDICT=512
+OLLAMA_TEMPERATURE=0
+```
+
+With this profile, a successful request normally makes two LLM calls: one for entity extraction and one for RDF generation. RDF generation defaults to one attempt. A client can explicitly set `max_rdf_attempts` to `2` or `3` when additional repair attempts are more important than latency.
+
 ## Run
 
 ```bash
-pip install -r requirements.txt
-python -m src.app
+python -m pip install -e .
+python -m hybrid_pipelines
 ```
 
 The service listens on `http://127.0.0.1:5050`.

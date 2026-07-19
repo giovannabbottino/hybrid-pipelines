@@ -34,7 +34,7 @@ Runs the hybrid Wikidata-grounded knowledge graph pipeline.
 {
   "text": "Mango is not a fruit from a tree.",
   "idempotence_key": "optional-stable-key",
-  "max_rdf_attempts": 3
+  "max_rdf_attempts": 1
 }
 ```
 
@@ -44,7 +44,7 @@ Fields:
 |-------|----------|-------------|
 | `text` | Yes | Source text to analyze. Leading and trailing whitespace is stripped. |
 | `idempotence_key` | No | Stable key used to group events in `ANALYZE_LOG_PATH`. If omitted, the service generates a UUID. |
-| `max_rdf_attempts` | No | Number of RDF generation/repair attempts, clamped from 1 to 3. Defaults to 3. |
+| `max_rdf_attempts` | No | Number of RDF generation/repair attempts, clamped from 1 to 3. Defaults to 1 for lower latency. |
 
 ### Behavior
 
@@ -53,13 +53,13 @@ Fields:
 3. Ask the LLM to return strict JSON with entity/concept mentions.
 4. Parse the JSON response, recover JSON embedded in prose when possible, and ignore invalid extraction output.
 5. Add heuristic mentions from non-stopword tokens in the input text.
-6. Deduplicate mentions and keep at most 10.
+6. Deduplicate mentions and keep at most `ENTITY_MENTION_LIMIT` (3 in the checked-in low-latency `.env`; the application default is 10).
 7. Resolve mentions through Wikidata MCP `search_items`; when enabled, merge candidates from the Wikidata Action API fallback.
 8. Fetch statements for resolved entities through MCP `get_statements`; when enabled, use the Action API fallback if MCP fails.
 9. Keep direct relationships where an entity statement points to another resolved entity.
 10. Load the RDF build prompt, inject a JSON payload with text, source attribution, compact entities, and relationships.
 11. Ask the LLM to return RDF/Turtle and strip code fences or trailing notes when present.
-12. Validate the RDF with `rdflib.Graph.parse(format="turtle")`, trying minor repairs and retrying the model with parser feedback when needed.
+12. Validate the RDF with `rdflib.Graph.parse(format="turtle")` and try minor local repairs. Retry the model with parser feedback only when `max_rdf_attempts` is greater than 1.
 13. Return the analysis response and write request events/LLM CSV logs when configured.
 
 ### Success response
@@ -109,7 +109,7 @@ Fields:
 |--------|-------|----------------|
 | `400` | Missing or blank `text`, or invalid local prompt path | `{ "error": "..." }` |
 | `502` | External service request failed, model request failed, or runtime generation error | `{ "error": "...", "details": "..." }` |
-| `508` | The model did not return valid Turtle RDF after the configured attempts | `{ "error": "rdf parse errror", "attempts": 3, "details": "..." }` |
+| `508` | The model did not return valid Turtle RDF after the configured attempts | `{ "error": "rdf parse errror", "attempts": 1, "details": "..." }` |
 | `504` | External service timeout | `{ "error": "External service request timed out.", "details": "...", "hint": "..." }` |
 
 ## Logs

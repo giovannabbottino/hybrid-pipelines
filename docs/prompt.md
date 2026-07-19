@@ -55,7 +55,7 @@ Expected output:
 
 The service parses this JSON and tolerates responses that contain JSON embedded in extra text, although the prompt asks for strict JSON only. Invalid or unparsable extraction output becomes an empty extraction result.
 
-After the LLM extraction, the service adds heuristic mentions from non-stopword tokens in the text, deduplicates mentions by surface form, and keeps at most 10 mentions.
+After the LLM extraction, the service adds heuristic mentions from non-stopword tokens, deduplicates mentions by surface form, and applies `ENTITY_MENTION_LIMIT`. The application default is 10; the checked-in low-latency profile uses 3. Because LLM mentions are added first, the configured limit prioritizes the model's extraction over heuristic additions.
 
 ## RDF build prompt
 
@@ -126,7 +126,7 @@ The RDF returned by Ollama is lightly cleaned and parsed before it is returned:
 - trailing notes or explanations are removed when they start with common note markers.
 - minor syntax repairs are tried, including normalized quotes, appending a final dot, and dropping an incomplete trailing statement/block;
 - the candidate RDF is parsed with `rdflib.Graph.parse(format="turtle")`;
-- when parsing fails and attempts remain, the model is asked to return corrected Turtle using the parser error and previous invalid RDF.
+- when parsing fails and attempts remain, the model is asked to return corrected Turtle using the parser error and previous invalid RDF. The API defaults to one attempt, so this extra LLM call occurs only when the client requests two or three attempts.
 
 If every attempt fails, the API returns an RDF parse error instead of invalid Turtle.
 

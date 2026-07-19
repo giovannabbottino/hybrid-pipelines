@@ -20,8 +20,26 @@ python -m pytest tests/unit/test_agent_service.py
 python -m pytest tests/unit/test_prompts.py
 ```
 
+## Continuous integration
+
+GitHub Actions runs `.github/workflows/ci.yml` for every push, pull request, and manual dispatch. The workflow:
+
+- runs Ruff and Pyright on Python 3.13;
+- runs the test suite on Python 3.10 and 3.13;
+- caches downloaded pip packages;
+- cancels an older run when a newer commit is pushed to the same branch.
+
+Run the same checks locally with:
+
+```bash
+python -m pip install -e ".[test,lint]"
+python -m ruff check .
+python -m pyright
+python -m pytest
+```
+
 ## Notes
 
-- Tests use the `pythonpath = .` setting from `pytest.ini`, so run them from the module root.
+- The project uses the standard `src` layout. Tests use `pythonpath = src` from `pytest.ini`, so run them from the repository root.
 - Pytest writes temporary files under `.pytest-runtime` through the configured `--basetemp`.
 - The automated tests do not require Ollama or live Wikidata access; external services are stubbed.

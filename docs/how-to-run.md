@@ -11,6 +11,10 @@ The application loads `.env` when running locally and also accepts regular envir
 - `OLLAMA_MODEL=llama3:8b`
 - `OLLAMA_CSV_PATH=data/ollama_responses.csv`
 - `OLLAMA_TIMEOUT_SECONDS=300`
+- `OLLAMA_TEMPERATURE=0`
+- `OLLAMA_NUM_PREDICT=512`
+- `LLM_ENTITY_EXTRACTION_ENABLED=true`
+- `ENTITY_MENTION_LIMIT=3`
 - `ANALYZE_LOG_PATH=data/analyze_log.jsonl`
 - `WIKIDATA_MCP_URL=https://wd-mcp.wmcloud.org/mcp/`
 - `WIKIDATA_LANGUAGE=en`
@@ -24,6 +28,10 @@ The application loads `.env` when running locally and also accepts regular envir
 - `WIKIDATA_RETRY_BACKOFF_SECONDS=2`
 
 Optional Ollama generation options are ignored when blank: `OLLAMA_SEED`, `OLLAMA_TEMPERATURE`, `OLLAMA_TOP_K`, `OLLAMA_TOP_P`, `OLLAMA_MIN_P`, `OLLAMA_STOP`, `OLLAMA_NUM_CTX`, and `OLLAMA_NUM_PREDICT`.
+
+The values above are the checked-in low-latency profile. Entity extraction remains assigned to the LLM, so the normal successful path uses two LLM calls. Limiting mentions to 3 reduces sequential Wikidata lookups, `OLLAMA_NUM_PREDICT=512` bounds RDF output length, and `OLLAMA_TEMPERATURE=0` favors deterministic Turtle.
+
+`POST /analyze` uses one RDF attempt by default. Set `max_rdf_attempts` to `2` or `3` in an individual request only when model-based RDF repair is worth the additional latency.
 
 ## Requirements
 
@@ -79,7 +87,7 @@ Linux / macOS:
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -e .
 ```
 
 Windows PowerShell:
@@ -116,7 +124,7 @@ $env:WIKIDATA_ALLOW_ACTION_API_FALLBACK="false"
 ### 4. Run the API
 
 ```bash
-python -m src.app
+python -m hybrid_pipelines
 ```
 
 The service listens on `http://127.0.0.1:5050`.
