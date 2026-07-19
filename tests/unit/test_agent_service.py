@@ -170,9 +170,10 @@ def test_agent_repairs_doubled_literal_quotes():
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "rdf_build":
                 return (
-                    "@prefix ex: <http://example.org/hybrid/> .\n"
                     "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
-                    'ex:mango rdfs:label ""Mango"" .'
+                    "@prefix wd: <http://www.wikidata.org/entity/> .\n"
+                    "@prefix kg: <https://example.org/wikidata-description/> .\n"
+                    'wd:Q1054564 rdfs:label ""Mango"" .'
                 )
             return super().generate(system_prompt, prompt, stage)
 
