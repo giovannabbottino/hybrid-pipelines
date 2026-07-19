@@ -138,7 +138,12 @@ def test_agent_retries_when_rdf_has_only_prefixes():
                     "@prefix wd: <http://www.wikidata.org/entity/> .\n"
                     "@prefix kg: <https://example.org/wikidata-description/> ."
                 ),
-                "@prefix ex: <http://example.org/hybrid/> .\nex:doc ex:mentions ex:mango .",
+                (
+                    "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
+                    "@prefix wd: <http://www.wikidata.org/entity/> .\n"
+                    "@prefix kg: <https://example.org/wikidata-description/> .\n"
+                    'wd:Q1054564 rdfs:label "Mango" .'
+                ),
             ]
 
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
