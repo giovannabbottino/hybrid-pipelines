@@ -17,16 +17,23 @@ Requirements:
 - Use @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 - Use @prefix wd: <http://www.wikidata.org/entity/> .
 - Use @prefix kg: <https://example.org/wikidata-description/> .
+- Preserve resolved Wikidata IDs in the RDF. For every item in `entities` whose `id` is `Q...`, the corresponding RDF resource MUST be `wd:Q...` using that exact `id`.
+- A resolved entity MUST NOT be replaced with a generated `kg:` resource, a blank node, or a label-only literal. Its QID must appear directly in at least one relationship triple as a subject or object.
+- For every provided relationship, use `subject_id` and `object_id` as `wd:Q...` resources when they are valid QIDs. Keep the IDs even when the labels differ from the text.
+- The required resolved-entity shape is: `wd:<id> rdfs:label "<mention.surface>"@en .` The angle-bracket names describe input fields; output the actual QID and text, not placeholders.
 - Create triples directly from the main resolved entity to entities identified in the description/text.
 - Use rdfs:label for every wd:Q... entity that appears in the graph.
 - Use rdfs:label for every kg: generated entity, concept, class, place, person, organization, event, and object that appears as a subject or object.
+- Labels are mandatory graph data, not optional documentation: emit the rdfs:label triple in the same Turtle response as the relationship triples.
+- For resolved entities, use `mention.surface` as the primary rdfs:label because it is the human-readable wording from the input text. Use the Wikidata `label` only as a fallback when `mention.surface` is empty.
+- Do not replace the text wording with a canonical, translated, normalized, or disambiguated Wikidata name. The dataset and this pipeline may resolve different QIDs, so downstream queries identify path endpoints by the human-readable text label rather than ID.
 - Prefer entity-to-entity triples over literal-only descriptions so downstream SPARQL can traverse from a subject label to an answer label.
 - Use kg:is for "entity is description entity" relationships.
 - Use kg:is for type, class, category, or "instance of" relationships unless a more specific provided Wikidata relationship is directly supported.
 - Prefer this predicate vocabulary when it fits the text: kg:is, kg:of, kg:from, kg:in, kg:on, kg:to, kg:with, kg:has_part, kg:part_of, kg:located_in, kg:instance_of.
 - Use kg:of, kg:from, kg:in, kg:on, kg:to, or kg:with when the input text contains those relationship words between resolved entities.
 - If the sentence expresses negation, add kg:negated true on the main entity.
-- Do not invent Wikidata QIDs. Only use QIDs from the provided entities or relationships.
+- Do not invent, alter, normalize, or omit Wikidata QIDs. Only use the exact QIDs from the provided `entities[].id`, `relationships[].subject_id`, and `relationships[].object_id` fields.
 - Do not include raw Wikidata statement dumps unless they directly connect the resolved entities.
 
 The response must start exactly like this:

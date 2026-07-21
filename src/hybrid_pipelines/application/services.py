@@ -7,7 +7,8 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 import requests
-from rdflib import Graph
+from rdflib import Graph, Literal, URIRef
+from rdflib.namespace import RDF, RDFS
 
 from ..domain.models import AnalyzeRequest, AnalyzeResponse, EntityMention, WikidataEntity, WikidataRelationship
 from ..infrastructure.request_logger import RequestLogger
@@ -164,6 +165,7 @@ class HybridAgentService:
             for repair_method, candidate_rdf in _rdf_repair_candidates(rdf):
                 try:
                     _parse_rdf(candidate_rdf)
+                    candidate_rdf = _ensure_entity_labels(candidate_rdf, entities, relationships)
                     self._log(
                         key,
                         "rdf_validated",
@@ -329,6 +331,60 @@ def _parse_rdf(rdf_text: str) -> None:
     # Prefix declarations alone parse successfully but produce an empty graph.
     if len(graph) == 0:
         raise ValueError("RDF response contains no triples.")
+
+
+def _ensure_entity_labels(
+    rdf_text: str,
+    entities: list[WikidataEntity],
+    relationships: list[WikidataRelationship],
+) -> str:
+    """Add labels omitted by the LLM without changing resource identities.
+
+    Prompting remains useful, but this post-condition makes label-based SPARQL
+    reliable even when the model returns valid Turtle with missing labels.
+    """
+    graph = Graph().parse(data=rdf_text, format="turtle")
+    graph.bind("rdfs", RDFS)
+    graph.bind("wd", URIRef("http://www.wikidata.org/entity/"))
+    graph.bind("kg", URIRef("https://example.org/wikidata-description/"))
+
+    known_labels: dict[str, str] = {}
+    for entity in entities:
+        if entity.id:
+            # The mention is the human-readable form present in the input text.
+            # Prefer it over Wikidata's canonical label so label-anchored queries
+            # can find the generated graph using the wording the user supplied.
+            text_label = entity.mention.surface.strip()
+            canonical_label = entity.label.strip()
+            if text_label or canonical_label:
+                known_labels[entity.id] = text_label or canonical_label
+    for relationship in relationships:
+        known_labels.setdefault(relationship.subject_id, relationship.subject_label)
+        known_labels.setdefault(relationship.object_id, relationship.object_label)
+
+    predicates = {predicate for _, predicate, _ in graph}
+    resources = {node for node in graph.subjects() if isinstance(node, URIRef)}
+    resources.update(node for node in graph.objects() if isinstance(node, URIRef))
+    for resource in resources:
+        if resource in predicates or resource in {RDF.type, RDFS.label}:
+            continue
+        label = _resource_label(resource, known_labels)
+        existing_labels = list(graph.objects(resource, RDFS.label))
+        if not label or any(str(existing) == label for existing in existing_labels):
+            continue
+        graph.add((resource, RDFS.label, Literal(label, lang="en")))
+
+    return graph.serialize(format="turtle")
+
+
+def _resource_label(resource: URIRef, known_labels: dict[str, str]) -> str:
+    value = str(resource)
+    qid_match = re.search(r"(?:^|/)(Q\d+)$", value)
+    if qid_match:
+        qid = qid_match.group(1)
+        return known_labels.get(qid, qid)
+    local_name = re.split(r"[/#]", value.rstrip("/#"))[-1]
+    return re.sub(r"[_-]+", " ", local_name).strip()
 
 
 def _rdf_repair_candidates(rdf_text: str):

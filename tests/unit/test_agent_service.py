@@ -123,7 +123,9 @@ def test_agent_retries_until_rdf_is_valid():
     )
 
     rdf_prompts = [call["prompt"] for call in llm.calls if call["stage"] == "rdf_build"]
-    assert response.rdf == "@prefix ex: <http://example.org/hybrid/> .\nex:doc ex:mentions ex:mango ."
+    assert "ex:mentions" in response.rdf
+    assert '"doc"@en' in response.rdf
+    assert '"mango"@en' in response.rdf
     assert len(rdf_prompts) == 2
     assert "previous answer was not valid Turtle RDF" in rdf_prompts[1]
 
@@ -160,12 +162,7 @@ def test_agent_retries_when_rdf_has_only_prefixes():
     )
 
     rdf_prompts = [call["prompt"] for call in llm.calls if call["stage"] == "rdf_build"]
-    assert response.rdf == (
-        "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
-        "@prefix wd: <http://www.wikidata.org/entity/> .\n"
-        "@prefix kg: <https://example.org/wikidata-description/> .\n"
-        'wd:Q1054564 rdfs:label "Mango" .'
-    )
+    assert 'rdfs:label "Mango"' in response.rdf
     assert len(rdf_prompts) == 2
     assert "RDF response contains no triples." in rdf_prompts[1]
 
@@ -194,6 +191,67 @@ def test_agent_repairs_doubled_literal_quotes():
 
     assert '""Mango""' not in response.rdf
     assert '"Mango"' in response.rdf
+
+
+def test_agent_adds_missing_labels_for_every_entity_resource():
+    class MissingLabelsLLM(StubLLM):
+        def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
+            if stage == "rdf_build":
+                return (
+                    "@prefix wd: <http://www.wikidata.org/entity/> .\n"
+                    "@prefix kg: <https://example.org/wikidata-description/> .\n"
+                    "wd:Q1054564 kg:is wd:Q1364 ."
+                )
+            return super().generate(system_prompt, prompt, stage, timeout_seconds)
+
+    service = HybridAgentService(
+        llm=MissingLabelsLLM(),
+        wikidata=StubWikidata(),
+        prompt_repository=StubPromptRepository(),
+    )
+
+    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
+
+    assert '"Mango"@en' in response.rdf
+    assert '"fruit"@en' in response.rdf
+
+
+def test_agent_prefers_human_readable_mention_from_text_over_wikidata_label():
+    class CanonicalLabelWikidata(StubWikidata):
+        def resolve_entities(self, mentions, limit=3, context=None):
+            entities = super().resolve_entities(mentions, limit, context)
+            return [
+                WikidataEntity(
+                    mention=entities[0].mention,
+                    id=entities[0].id,
+                    iri=entities[0].iri,
+                    label="Mangifera indica fruit",
+                ),
+                *entities[1:],
+            ]
+
+    class MissingLabelsLLM(StubLLM):
+        def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
+            if stage == "rdf_build":
+                return (
+                    "@prefix wd: <http://www.wikidata.org/entity/> .\n"
+                    "@prefix kg: <https://example.org/wikidata-description/> .\n"
+                    "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
+                    "wd:Q1054564 rdfs:label \"Mangifera indica fruit\"@en ; "
+                    "kg:is wd:Q1364 ."
+                )
+            return super().generate(system_prompt, prompt, stage, timeout_seconds)
+
+    service = HybridAgentService(
+        llm=MissingLabelsLLM(),
+        wikidata=CanonicalLabelWikidata(),
+        prompt_repository=StubPromptRepository(),
+    )
+
+    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
+
+    assert '"Mango"@en' in response.rdf
+    assert '"Mangifera indica fruit"@en' in response.rdf
 
 
 def test_agent_raises_timeout_when_max_processing_seconds_is_too_low():

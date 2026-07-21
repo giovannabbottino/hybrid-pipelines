@@ -1,5 +1,15 @@
 from pathlib import Path
 
+from hybrid_pipelines.infrastructure.prompt_repository import PromptRepository
+
+
+def test_prompt_repository_loads_project_prompts():
+    repository = PromptRepository()
+
+    assert repository.load_prompt("system/agent.txt")
+    assert repository.load_prompt("prompts/entity-extraction.txt")
+    assert repository.load_prompt("prompts/rdf-build.txt")
+
 
 def test_rdf_prompt_requires_only_turtle_and_expected_prefixes():
     prompt = Path("prompt/prompts/rdf-build.txt").read_text(encoding="utf-8")
@@ -10,3 +20,13 @@ def test_rdf_prompt_requires_only_turtle_and_expected_prefixes():
     assert "@prefix wd: <http://www.wikidata.org/entity/> ." in prompt
     assert "@prefix kg: <https://example.org/wikidata-description/> ." in prompt
     assert "@prefix ex:" not in prompt
+
+
+def test_rdf_prompt_requires_resolved_ids_and_human_labels():
+    prompt = Path("prompt/prompts/rdf-build.txt").read_text(encoding="utf-8")
+
+    assert "corresponding RDF resource MUST be `wd:Q...`" in prompt
+    assert "Its QID must appear directly in at least one relationship triple" in prompt
+    assert "`subject_id` and `object_id`" in prompt
+    assert 'wd:<id> rdfs:label "<mention.surface>"@en' in prompt
+    assert "Do not invent, alter, normalize, or omit Wikidata QIDs" in prompt
