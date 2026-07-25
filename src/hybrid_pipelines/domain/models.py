@@ -10,6 +10,7 @@ class AnalyzeRequest:
     idempotence_key: str | None = None
     max_rdf_attempts: int = 1
     max_processing_seconds: float | None = None
+    prefer_deterministic_rdf: bool = False
 
 
 @dataclass(frozen=True)
