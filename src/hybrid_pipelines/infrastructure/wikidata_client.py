@@ -545,46 +545,6 @@ def _normalized_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
-def _looks_like_named_work(item: dict[str, Any]) -> bool:
-    description = (_entity_description(item) or "").casefold()
-    bad_phrases = {
-        "scholarly article",
-        "scientific article",
-        "painting",
-        "song",
-        "album",
-        "video game",
-        "film",
-        "television series",
-        "book",
-        "company",
-        "musical group",
-        "family name",
-        "given name",
-        "surname",
-        "command",
-        "entomologist",
-        "person",
-        "human",
-    }
-    return any(phrase in description for phrase in bad_phrases)
-
-
-def _looks_like_concrete_concept(item: dict[str, Any]) -> bool:
-    description = (_entity_description(item) or "").casefold()
-    good_phrases = {
-        "fruit",
-        "plant",
-        "tree",
-        "woody",
-        "species",
-        "organism",
-        "taxon",
-        "food",
-    }
-    return any(phrase in description for phrase in good_phrases)
-
-
 def _terms(text: str) -> set[str]:
     stopwords = {"a", "an", "the", "is", "are", "was", "were", "not", "from", "of", "in", "on", "to", "and", "or"}
     return {
