@@ -149,10 +149,7 @@ class HybridAgentService:
         items = payload.get("entities") if isinstance(payload, dict) else None
         mentions = [_mention_from_item(item) for item in items or [] if isinstance(item, dict)]
         mentions = [mention for mention in mentions if mention.surface]
-        if not mentions:
-            mentions = _heuristic_mentions(text)
-        else:
-            mentions = _realign_mentions(text, mentions)
+        mentions = _heuristic_mentions(text) if not mentions else _realign_mentions(text, mentions)
         mentions = _supplement_mentions(text, mentions, self.mention_limit)
         return _dedupe_mentions(mentions)[: self.mention_limit], raw
 

@@ -89,10 +89,7 @@ class WikidataMCPClient:
             label = _entity_label(chosen) or mention.surface
             iri = f"http://www.wikidata.org/entity/{entity_id}" if entity_id else None
             statements = []
-            should_fetch_statements = (
-                entity_id is not None and mention.confidence != 0.5
-            )
-            if should_fetch_statements:
+            if entity_id is not None and mention.confidence != 0.5:
                 if entity_id not in self._statement_cache:
                     self._statement_cache[entity_id] = self.get_statements(entity_id)
                 statements = self._statement_cache[entity_id]
