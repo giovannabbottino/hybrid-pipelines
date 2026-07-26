@@ -56,6 +56,7 @@ class WikidataMCPClient:
         self._session_id: str | None = None
         self._initialized = False
         self._label_cache: dict[str, str] = {}
+        self._statement_cache: dict[str, list[dict[str, Any]]] = {}
 
     def health(self) -> dict[str, Any]:
         try:
@@ -72,13 +73,26 @@ class WikidataMCPClient:
     ) -> list[WikidataEntity]:
         entities: list[WikidataEntity] = []
         for mention in mentions:
-            query = _contextual_query(mention.surface, context or "")
+            mention_context = _mention_context(context or "", mention)
+            query = _contextual_query(mention.surface, mention_context)
             candidates = self.search_items(query, limit=max(limit, 10))
-            chosen = _choose_candidate(candidates, context=context or mention.surface) if candidates else {}
+            chosen = (
+                _choose_candidate(
+                    candidates,
+                    context=mention_context or mention.surface,
+                    surface=mention.surface,
+                )
+                if candidates
+                else {}
+            )
             entity_id = _entity_id(chosen)
             label = _entity_label(chosen) or mention.surface
             iri = f"http://www.wikidata.org/entity/{entity_id}" if entity_id else None
-            statements = self.get_statements(entity_id) if entity_id else []
+            statements = []
+            if entity_id is not None and mention.confidence != 0.5:
+                if entity_id not in self._statement_cache:
+                    self._statement_cache[entity_id] = self.get_statements(entity_id)
+                statements = self._statement_cache[entity_id]
             if entity_id:
                 self._label_cache[entity_id] = label
             entities.append(
@@ -462,12 +476,22 @@ def _entity_score(item: dict[str, Any]) -> float | None:
     return None
 
 
-def _choose_candidate(candidates: list[dict[str, Any]], context: str) -> dict[str, Any]:
+def _choose_candidate(
+    candidates: list[dict[str, Any]],
+    context: str,
+    surface: str = "",
+) -> dict[str, Any]:
     context_terms = _terms(context)
     if not context_terms:
         return candidates[0]
 
-    def score(item: dict[str, Any]) -> tuple[int, int, int, float]:
+    normalized_surface = _normalized_name(surface)
+
+    def score(index_and_item: tuple[int, dict[str, Any]]) -> tuple[int, float, int, int]:
+        index, item = index_and_item
+        label = _entity_label(item) or ""
+        normalized_label = _normalized_name(label)
+        label_terms = _terms(label)
         haystack = " ".join(
             value
             for value in (
@@ -477,56 +501,45 @@ def _choose_candidate(candidates: list[dict[str, Any]], context: str) -> dict[st
             if value
         )
         overlap = len(context_terms.intersection(_terms(haystack)))
-        type_penalty = 1 if _looks_like_named_work(item) else 0
-        concept_bonus = 1 if _looks_like_concrete_concept(item) else 0
-        rank = _entity_score(item) or 0.0
-        return overlap, concept_bonus, -type_penalty, rank
+        label_overlap = (
+            len(_terms(surface) & label_terms) / len(_terms(surface) | label_terms)
+            if _terms(surface) and label_terms
+            else 0.0
+        )
+        return (
+            1 if normalized_surface and normalized_label == normalized_surface else 0,
+            label_overlap,
+            -index,
+            overlap,
+        )
 
-    return max(candidates, key=score)
+    return max(enumerate(candidates), key=score)[1]
 
 
 def _contextual_query(surface: str, context: str) -> str:
     return surface
 
 
-def _looks_like_named_work(item: dict[str, Any]) -> bool:
-    description = (_entity_description(item) or "").casefold()
-    bad_phrases = {
-        "scholarly article",
-        "scientific article",
-        "painting",
-        "song",
-        "album",
-        "video game",
-        "film",
-        "television series",
-        "book",
-        "company",
-        "musical group",
-        "family name",
-        "given name",
-        "surname",
-        "command",
-        "entomologist",
-        "person",
-        "human",
-    }
-    return any(phrase in description for phrase in bad_phrases)
+def _mention_context(
+    context: str,
+    mention: EntityMention,
+) -> str:
+    """Return sentence-local context for one resolved mention."""
+    if mention.start is None or mention.end is None:
+        return context
+    previous_boundaries = [context.rfind(mark, 0, mention.start) for mark in ".!?\n"]
+    start = max(previous_boundaries) + 1
+    following = [
+        position
+        for mark in ".!?\n"
+        if (position := context.find(mark, mention.end)) >= 0
+    ]
+    end = min(following) + 1 if following else len(context)
+    return context[start:end]
 
 
-def _looks_like_concrete_concept(item: dict[str, Any]) -> bool:
-    description = (_entity_description(item) or "").casefold()
-    good_phrases = {
-        "fruit",
-        "plant",
-        "tree",
-        "woody",
-        "species",
-        "organism",
-        "taxon",
-        "food",
-    }
-    return any(phrase in description for phrase in good_phrases)
+def _normalized_name(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
 
 
 def _terms(text: str) -> set[str]:

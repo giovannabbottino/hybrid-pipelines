@@ -7,7 +7,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 import requests
-from rdflib import Graph, Literal, URIRef
+from rdflib import Graph, Literal, Namespace, URIRef
 from rdflib.namespace import RDF, RDFS
 
 from ..domain.models import AnalyzeRequest, AnalyzeResponse, EntityMention, WikidataEntity, WikidataRelationship
@@ -104,6 +104,11 @@ class HybridAgentService:
             key,
             getattr(request, "max_rdf_attempts", 1),
             deadline,
+            prefer_deterministic=getattr(
+                request,
+                "prefer_deterministic_rdf",
+                False,
+            ),
         )
         self._log(key, "rdf_built", {"rdf": rdf})
 
@@ -144,7 +149,8 @@ class HybridAgentService:
         items = payload.get("entities") if isinstance(payload, dict) else None
         mentions = [_mention_from_item(item) for item in items or [] if isinstance(item, dict)]
         mentions = [mention for mention in mentions if mention.surface]
-        mentions = [*mentions, *_heuristic_mentions(text)]
+        mentions = _heuristic_mentions(text) if not mentions else _realign_mentions(text, mentions)
+        mentions = _supplement_mentions(text, mentions, self.mention_limit)
         return _dedupe_mentions(mentions)[: self.mention_limit], raw
 
     def _build_valid_rdf(
@@ -155,17 +161,43 @@ class HybridAgentService:
         key: str,
         max_attempts: int,
         deadline: float | None = None,
+        prefer_deterministic: bool = False,
     ) -> str:
         attempts = max(1, min(int(max_attempts or 3), 3))
-        prompt = self._build_rdf_prompt(text, entities, relationships)
         last_error = None
 
+        if prefer_deterministic:
+            try:
+                deterministic_rdf = _build_deterministic_rdf(
+                    text,
+                    entities,
+                    relationships,
+                )
+                _parse_rdf(deterministic_rdf)
+                self._log(
+                    key,
+                    "rdf_validated",
+                    {
+                        "attempt": 0,
+                        "repair_method": "deterministic_primary",
+                    },
+                )
+                return deterministic_rdf
+            except Exception as exc:
+                last_error = f"deterministic primary: {exc}"
+
+        prompt = self._build_rdf_prompt(text, entities, relationships)
         for attempt in range(1, attempts + 1):
             rdf = self._build_rdf(prompt, key, deadline)
             for repair_method, candidate_rdf in _rdf_repair_candidates(rdf):
                 try:
                     _parse_rdf(candidate_rdf)
-                    candidate_rdf = _ensure_entity_labels(candidate_rdf, entities, relationships)
+                    candidate_rdf = _ensure_entity_labels(
+                        candidate_rdf,
+                        text,
+                        entities,
+                        relationships,
+                    )
                     self._log(
                         key,
                         "rdf_validated",
@@ -175,11 +207,44 @@ class HybridAgentService:
                 except Exception as exc:  # rdflib raises parser-specific exception classes.
                     last_error = str(exc)
 
-            if attempt == attempts:
-                break
-            prompt = _build_retry_prompt(prompt, rdf, last_error or "Invalid Turtle RDF.")
+            try:
+                fallback_rdf = _build_deterministic_rdf(
+                    text,
+                    entities,
+                    relationships,
+                )
+                _parse_rdf(fallback_rdf)
+                self._log(
+                    key,
+                    "rdf_validated",
+                    {
+                        "attempt": attempt,
+                        "repair_method": "deterministic_fallback",
+                        "previous_error": last_error,
+                    },
+                )
+                return fallback_rdf
+            except Exception as exc:
+                fallback_error = str(exc)
+                if last_error:
+                    last_error = (
+                        f"{last_error}; deterministic fallback: {fallback_error}"
+                    )
+                else:
+                    last_error = f"deterministic fallback: {fallback_error}"
 
-        raise RDFValidationError("rdf parse errror", attempts=attempts, last_error=last_error)
+            if attempt < attempts:
+                prompt = _build_retry_prompt(
+                    prompt,
+                    rdf,
+                    last_error or "Invalid Turtle RDF.",
+                )
+
+        raise RDFValidationError(
+            "rdf parse errror",
+            attempts=attempts,
+            last_error=last_error,
+        )
 
     def _build_rdf_prompt(
         self,
@@ -226,18 +291,33 @@ class HybridAgentService:
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
+    def payload_from(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, list):
+            return {"entities": value}
+        return {}
+
     try:
-        data = json.loads(text)
-        return data if isinstance(data, dict) else {}
+        return payload_from(json.loads(text))
     except json.JSONDecodeError:
         match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if not match:
-            return {}
-        try:
-            data = json.loads(match.group(0))
-            return data if isinstance(data, dict) else {}
-        except json.JSONDecodeError:
-            return {}
+        if match:
+            try:
+                return payload_from(json.loads(match.group(0)))
+            except json.JSONDecodeError:
+                pass
+
+        entities_start = re.search(r'"entities"\s*:\s*', text)
+        array_start = text.find("[", entities_start.end() if entities_start else 0)
+        array_end = text.rfind("]")
+        if array_start >= 0 and array_end > array_start:
+            try:
+                entities = json.loads(text[array_start : array_end + 1])
+                return payload_from(entities)
+            except json.JSONDecodeError:
+                pass
+        return {}
 
 
 def _mention_from_item(item: dict[str, Any]) -> EntityMention:
@@ -287,16 +367,125 @@ def _heuristic_mentions(text: str) -> list[EntityMention]:
     return mentions
 
 
+_DESCRIPTOR_HEADS = (
+    "brand|car|vehicle|boat|ship|company|corporation|label|name|"
+    "musician|singer-songwriter|language|service|services|outlet|"
+    "fashion|line|lines|range"
+)
+
+
+def _supplement_mentions(
+    text: str,
+    mentions: list[EntityMention],
+    limit: int,
+) -> list[EntityMention]:
+    """Fill omitted relation/class concepts without inventing text spans."""
+    supplemental: list[EntityMention] = []
+    descriptor_pattern = re.compile(
+        rf"\b(?P<modifier>[A-Za-z][A-Za-z'-]*)\s+"
+        rf"(?P<head>{_DESCRIPTOR_HEADS})\b",
+        flags=re.IGNORECASE,
+    )
+    head_priority = {
+        "name": 0,
+        "label": 0,
+        "car": 1,
+        "boat": 1,
+        "ship": 1,
+    }
+    descriptor_matches = sorted(
+        descriptor_pattern.finditer(text),
+        key=lambda match: (
+            head_priority.get(match.group("head").casefold(), 2),
+            match.start(),
+        ),
+    )
+    ignored_modifiers = {
+        "a", "an", "and", "as", "in", "its", "of", "on", "or", "the", "to",
+    }
+    for match in descriptor_matches:
+        modifier = match.group("modifier")
+        if len(modifier) < 2 or modifier.casefold() in ignored_modifiers:
+            continue
+        supplemental.append(
+            EntityMention(
+                surface=modifier,
+                start=match.start("modifier"),
+                end=match.end("modifier"),
+                entity_type="Concept",
+                confidence=0.5,
+            )
+        )
+        supplemental.append(
+            EntityMention(
+                surface=match.group(0),
+                start=match.start(),
+                end=match.end(),
+                entity_type="Class",
+                confidence=0.5,
+            )
+        )
+
+    for match in re.finditer(
+        r"\b(?:type|class|model|series|no\.?)\s+(?P<value>\d+[A-Za-z]?)\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        supplemental.append(
+            EntityMention(
+                surface=match.group("value"),
+                start=match.start("value"),
+                end=match.end("value"),
+                entity_type="Concept",
+                confidence=0.5,
+            )
+        )
+
+    return _dedupe_mentions([*mentions, *supplemental])[: max(1, int(limit))]
+
+
 def _dedupe_mentions(mentions: list[EntityMention]) -> list[EntityMention]:
-    seen: set[str] = set()
+    seen: set[tuple[str, int | None, int | None]] = set()
     deduped: list[EntityMention] = []
     for mention in mentions:
-        key = mention.surface.casefold()
+        key = (mention.surface.casefold(), mention.start, mention.end)
         if key in seen:
             continue
         seen.add(key)
         deduped.append(mention)
     return deduped
+
+
+def _realign_mentions(text: str, mentions: list[EntityMention]) -> list[EntityMention]:
+    """Realign model-provided offsets to exact, successive text occurrences."""
+    occupied_spans: list[tuple[int, int]] = []
+    cursor = 0
+    aligned: list[EntityMention] = []
+    for mention in mentions:
+        matches = list(re.finditer(re.escape(mention.surface), text, flags=re.IGNORECASE))
+        available = [
+            match
+            for match in matches
+            if not any(
+                match.start() < occupied_end and match.end() > occupied_start
+                for occupied_start, occupied_end in occupied_spans
+            )
+        ]
+        if not available:
+            continue
+        match = next((item for item in available if item.start() >= cursor), available[0])
+        occupied_spans.append((match.start(), match.end()))
+        cursor = max(cursor, match.end())
+        aligned.append(
+            EntityMention(
+                surface=mention.surface,
+                start=match.start(),
+                end=match.end(),
+                entity_type=mention.entity_type,
+                confidence=mention.confidence,
+            )
+        )
+    return aligned
 
 
 def _compact_entity(entity: WikidataEntity, statement_limit: int = 8) -> dict[str, Any]:
@@ -333,8 +522,50 @@ def _parse_rdf(rdf_text: str) -> None:
         raise ValueError("RDF response contains no triples.")
 
 
+def _build_deterministic_rdf(
+    text: str,
+    entities: list[WikidataEntity],
+    relationships: list[WikidataRelationship],
+) -> str:
+    """Build a valid evidence-only graph when every LLM Turtle attempt is invalid."""
+    graph = Graph()
+    wd = Namespace("http://www.wikidata.org/entity/")
+    graph.bind("rdfs", RDFS)
+    graph.bind("wd", wd)
+
+    for entity in entities:
+        if not entity.id or not re.fullmatch(r"Q\d+", entity.id):
+            continue
+        label = (
+            _human_readable_label(entity.mention.surface)
+            or _human_readable_label(entity.label)
+        )
+        if label:
+            graph.add((wd[entity.id], RDFS.label, Literal(label, lang="en")))
+
+    for relationship in relationships:
+        for entity_id, raw_label in (
+            (relationship.subject_id, relationship.subject_label),
+            (relationship.object_id, relationship.object_label),
+        ):
+            label = _human_readable_label(raw_label)
+            if re.fullmatch(r"Q\d+", entity_id) and label:
+                graph.add((wd[entity_id], RDFS.label, Literal(label, lang="en")))
+
+    if len(graph) == 0:
+        raise ValueError("No resolved, human-readable entities for deterministic RDF.")
+
+    return _ensure_entity_labels(
+        graph.serialize(format="turtle"),
+        text,
+        entities,
+        relationships,
+    )
+
+
 def _ensure_entity_labels(
     rdf_text: str,
+    text: str,
     entities: list[WikidataEntity],
     relationships: list[WikidataRelationship],
 ) -> str:
@@ -344,9 +575,22 @@ def _ensure_entity_labels(
     reliable even when the model returns valid Turtle with missing labels.
     """
     graph = Graph().parse(data=rdf_text, format="turtle")
+    wd = Namespace("http://www.wikidata.org/entity/")
+    kg = Namespace("https://example.org/wikidata-description/")
     graph.bind("rdfs", RDFS)
-    graph.bind("wd", URIRef("http://www.wikidata.org/entity/"))
-    graph.bind("kg", URIRef("https://example.org/wikidata-description/"))
+    graph.bind("wd", wd)
+    graph.bind("kg", kg)
+
+    allowed_qids = {
+        entity.id for entity in entities if entity.id and re.fullmatch(r"Q\d+", entity.id)
+    }
+    allowed_qids.update(
+        entity_id
+        for relationship in relationships
+        for entity_id in (relationship.subject_id, relationship.object_id)
+        if re.fullmatch(r"Q\d+", entity_id)
+    )
+    _remove_unresolved_wikidata_resources(graph, allowed_qids, wd)
 
     known_labels: dict[str, str] = {}
     for entity in entities:
@@ -354,13 +598,37 @@ def _ensure_entity_labels(
             # The mention is the human-readable form present in the input text.
             # Prefer it over Wikidata's canonical label so label-anchored queries
             # can find the generated graph using the wording the user supplied.
-            text_label = entity.mention.surface.strip()
-            canonical_label = entity.label.strip()
+            text_label = _human_readable_label(entity.mention.surface)
+            canonical_label = _human_readable_label(entity.label)
             if text_label or canonical_label:
                 known_labels[entity.id] = text_label or canonical_label
+                graph.add(
+                    (
+                        wd[entity.id],
+                        RDFS.label,
+                        Literal(text_label or canonical_label, lang="en"),
+                    )
+                )
     for relationship in relationships:
-        known_labels.setdefault(relationship.subject_id, relationship.subject_label)
-        known_labels.setdefault(relationship.object_id, relationship.object_label)
+        subject_label = _human_readable_label(relationship.subject_label)
+        object_label = _human_readable_label(relationship.object_label)
+        if subject_label:
+            known_labels.setdefault(relationship.subject_id, subject_label)
+        if object_label:
+            known_labels.setdefault(relationship.object_id, object_label)
+
+        if re.fullmatch(r"Q\d+", relationship.subject_id) and re.fullmatch(
+            r"Q\d+", relationship.object_id
+        ):
+            graph.add(
+                (
+                    wd[relationship.subject_id],
+                    _relationship_predicate(relationship, kg),
+                    wd[relationship.object_id],
+                )
+            )
+
+    _ensure_text_cooccurrence_relations(graph, text, entities, kg, wd)
 
     predicates = {predicate for _, predicate, _ in graph}
     resources = {node for node in graph.subjects() if isinstance(node, URIRef)}
@@ -370,11 +638,108 @@ def _ensure_entity_labels(
             continue
         label = _resource_label(resource, known_labels)
         existing_labels = list(graph.objects(resource, RDFS.label))
-        if not label or any(str(existing) == label for existing in existing_labels):
+        for existing in existing_labels:
+            if not _human_readable_label(str(existing)):
+                graph.remove((resource, RDFS.label, existing))
+        existing_labels = list(graph.objects(resource, RDFS.label))
+        if not label or any(str(existing).casefold() == label.casefold() for existing in existing_labels):
             continue
         graph.add((resource, RDFS.label, Literal(label, lang="en")))
 
     return graph.serialize(format="turtle")
+
+
+def _remove_unresolved_wikidata_resources(
+    graph: Graph,
+    allowed_qids: set[str],
+    wd: Namespace,
+) -> None:
+    namespace = str(wd)
+    for triple in list(graph):
+        subject, predicate, object_ = triple
+        wikidata_nodes = [
+            node
+            for node in (subject, predicate, object_)
+            if isinstance(node, URIRef) and str(node).startswith(namespace)
+        ]
+        if any(str(node).removeprefix(namespace) not in allowed_qids for node in wikidata_nodes):
+            graph.remove(triple)
+
+
+def _ensure_text_cooccurrence_relations(
+    graph: Graph,
+    text: str,
+    entities: list[WikidataEntity],
+    kg: Namespace,
+    wd: Namespace,
+) -> None:
+    """Add text-local connectivity and directed class/type semantics."""
+    segments = _discourse_segments(text)
+    entities_by_segment: dict[int, list[tuple[URIRef, WikidataEntity]]] = {}
+    for entity in entities:
+        if not entity.id or not re.fullmatch(r"Q\d+", entity.id):
+            continue
+        start = entity.mention.start
+        if start is None:
+            continue
+        segment_index = next(
+            (
+                index
+                for index, (segment_start, segment_end) in enumerate(segments)
+                if segment_start <= start < segment_end
+            ),
+            None,
+        )
+        if segment_index is None:
+            continue
+        resource = wd[entity.id]
+        segment_entities = entities_by_segment.setdefault(segment_index, [])
+        if not any(existing_resource == resource for existing_resource, _ in segment_entities):
+            segment_entities.append((resource, entity))
+
+    for segment_entities in entities_by_segment.values():
+        for left_index, (left, left_entity) in enumerate(segment_entities):
+            for right, right_entity in segment_entities[left_index + 1 :]:
+                graph.add((left, kg.related_to, right))
+                graph.add((right, kg.related_to, left))
+                if _is_classlike_mention(right_entity.mention):
+                    graph.add((left, kg["is"], right))
+                if _is_classlike_mention(left_entity.mention):
+                    graph.add((right, kg["is"], left))
+
+
+def _is_classlike_mention(mention: EntityMention) -> bool:
+    entity_type = str(mention.entity_type or "").casefold()
+    return any(
+        marker in entity_type
+        for marker in ("class", "concept", "object", "nationality")
+    )
+
+
+def _discourse_segments(text: str) -> list[tuple[int, int]]:
+    boundaries = [0]
+    boundaries.extend(
+        match.end()
+        for match in re.finditer(r"(?<=[.!?])\s+(?=[A-Z])", text)
+    )
+    boundaries.append(len(text))
+    sentence_spans = [
+        (boundaries[index], boundaries[index + 1])
+        for index in range(len(boundaries) - 1)
+        if text[boundaries[index] : boundaries[index + 1]].strip()
+    ]
+    continuation = re.compile(
+        r"^(?:although|until|he|she|it|they|this|these|those|whose|which|the\s+(?:boat|brand|company))\b",
+        flags=re.IGNORECASE,
+    )
+    segments: list[tuple[int, int]] = []
+    for sentence_start, sentence_end in sentence_spans:
+        sentence_text = text[sentence_start:sentence_end].strip()
+        if segments and continuation.match(sentence_text):
+            segments[-1] = (segments[-1][0], sentence_end)
+        else:
+            segments.append((sentence_start, sentence_end))
+    return segments
 
 
 def _resource_label(resource: URIRef, known_labels: dict[str, str]) -> str:
@@ -382,9 +747,33 @@ def _resource_label(resource: URIRef, known_labels: dict[str, str]) -> str:
     qid_match = re.search(r"(?:^|/)(Q\d+)$", value)
     if qid_match:
         qid = qid_match.group(1)
-        return known_labels.get(qid, qid)
+        return known_labels.get(qid, "")
     local_name = re.split(r"[/#]", value.rstrip("/#"))[-1]
-    return re.sub(r"[_-]+", " ", local_name).strip()
+    return _human_readable_label(re.sub(r"[_-]+", " ", local_name))
+
+
+def _human_readable_label(value: str | None) -> str:
+    label = str(value or "").strip()
+    return "" if re.fullmatch(r"(?:wd:)?Q\d+", label, flags=re.IGNORECASE) else label
+
+
+def _relationship_predicate(
+    relationship: WikidataRelationship,
+    kg: Namespace,
+) -> URIRef:
+    label = relationship.property_label.casefold().strip()
+    predicate_names = {
+        "instance of": "is",
+        "subclass of": "is",
+        "part of": "part_of",
+        "has part": "has_part",
+        "country": "located_in",
+        "location": "located_in",
+    }
+    local_name = predicate_names.get(label)
+    if not local_name:
+        local_name = re.sub(r"[^a-z0-9]+", "_", label).strip("_") or "related_to"
+    return kg[local_name]
 
 
 def _rdf_repair_candidates(rdf_text: str):

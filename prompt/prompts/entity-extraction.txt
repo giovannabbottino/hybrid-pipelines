@@ -14,10 +14,16 @@ Return strict JSON only:
 }
 
 Rules:
+- Prioritize every main entity described in the passage, then its explicit class,
+  nationality, location, organization, product, and other directly related concepts.
 - Include named entities and common-noun concepts that participate in the meaning.
+- When the same surface form denotes different entities in different parts of the
+  passage, include each occurrence with its own character offsets. They are not duplicates.
 - Use character offsets where possible.
-- Do not extract stopwords, verbs, or duplicate surfaces.
-- Keep at most 10 entities.
+- Do not extract stopwords or verbs. Do not repeat the same occurrence/span;
+  preserve the same surface text when it occurs at different spans or senses.
+- Keep at most 16 entities and distribute them across all distinct subjects/senses
+  instead of exhausting the limit on the first sentence.
 
 Text:
 ${TEXT}
