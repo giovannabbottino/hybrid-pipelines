@@ -95,22 +95,28 @@ def test_agent_extracts_entities_resolves_wikidata_and_builds_rdf():
     assert response.rdf.startswith("@prefix")
 
 
-def test_agent_can_skip_llm_entity_extraction():
-    llm = StubLLM()
+def test_agent_uses_heuristic_mentions_when_llm_returns_no_entities():
+    class EmptyExtractionLLM(StubLLM):
+        def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
+            if stage == "entity_extraction":
+                self.calls.append({"system_prompt": system_prompt, "prompt": prompt, "stage": stage})
+                return json.dumps({"entities": []})
+            return super().generate(system_prompt, prompt, stage, timeout_seconds)
+
+    llm = EmptyExtractionLLM()
     wikidata = StubWikidata()
     service = HybridAgentService(
         llm=llm,
         wikidata=wikidata,
         prompt_repository=StubPromptRepository(),
-        llm_entity_extraction_enabled=False,
         mention_limit=3,
     )
 
     response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
 
-    assert [call["stage"] for call in llm.calls] == ["rdf_build"]
+    assert [call["stage"] for call in llm.calls] == ["entity_extraction", "rdf_build"]
     assert [entity.mention.surface for entity in response.entities] == ["Mango", "fruit", "tree"]
-    assert response.llm["entity_extraction"] == ""
+    assert json.loads(response.llm["entity_extraction"]) == {"entities": []}
 
 
 def test_agent_does_not_add_heuristic_words_when_llm_found_entities():
@@ -512,4 +518,3 @@ def test_supplement_mentions_prioritizes_name_and_label_descriptors():
 
     assert surfaces == ["trade", "trade name", "record", "record label"]
     assert "and" not in surfaces
-

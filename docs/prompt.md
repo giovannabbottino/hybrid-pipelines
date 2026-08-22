@@ -55,7 +55,7 @@ Expected output:
 
 The service parses this JSON and tolerates responses that contain JSON embedded in extra text, although the prompt asks for strict JSON only. Invalid or unparsable extraction output becomes an empty extraction result.
 
-After the LLM extraction, the service adds heuristic mentions from non-stopword tokens, deduplicates mentions by surface form, and applies `ENTITY_MENTION_LIMIT`. The application default is 10; the checked-in low-latency profile uses 3. Because LLM mentions are added first, the configured limit prioritizes the model's extraction over heuristic additions.
+Entity extraction always calls the LLM. The service realigns model mentions with nonempty surfaces to the source text and supplements supported descriptor and numbered-concept patterns. When the parsed response contains no nonempty mention surfaces, it recovers mentions from non-stopword tokens before applying the same supplementation. Mentions are deduplicated by case-insensitive surface form and offsets, then limited by `ENTITY_MENTION_LIMIT`. The application default is 10, while the current `.env` uses 16.
 
 ## RDF build prompt
 

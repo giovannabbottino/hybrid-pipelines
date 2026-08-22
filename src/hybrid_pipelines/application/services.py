@@ -62,7 +62,6 @@ class HybridAgentService:
         request_logger: RequestLogger | None = None,
         candidate_limit: int = 3,
         analyze_timeout_seconds: float = 540.0,
-        llm_entity_extraction_enabled: bool = True,
         mention_limit: int = 10,
     ) -> None:
         self.llm = llm
@@ -74,7 +73,6 @@ class HybridAgentService:
         self.request_logger = request_logger
         self.candidate_limit = max(1, int(candidate_limit))
         self.analyze_timeout_seconds = max(1.0, float(analyze_timeout_seconds))
-        self.llm_entity_extraction_enabled = bool(llm_entity_extraction_enabled)
         self.mention_limit = max(1, int(mention_limit))
 
     def analyze(self, request: AnalyzeRequest) -> AnalyzeResponse:
@@ -127,11 +125,6 @@ class HybridAgentService:
         }
 
     def _extract_entities(self, text: str, key: str, deadline: float | None = None) -> tuple[list[EntityMention], str]:
-        if not self.llm_entity_extraction_enabled:
-            mentions = _dedupe_mentions(_heuristic_mentions(text))[: self.mention_limit]
-            self._log(key, "heuristic_entity_extraction", {"mentions": [mention.to_dict() for mention in mentions]})
-            return mentions, ""
-
         system_prompt = self.prompt_repository.load_prompt(self.system_prompt_name)
         prompt_template = self.prompt_repository.load_prompt(self.entity_prompt_name)
         prompt = prompt_template.replace("${TEXT}", text)

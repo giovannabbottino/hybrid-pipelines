@@ -5,7 +5,7 @@ Flask API that builds a knowledge graph by combining LLM prompts with Wikidata e
 ## Flow
 
 1. The LLM extracts entity and concept mentions from the input text.
-2. The service adds lightweight heuristic mentions from the text and deduplicates them.
+2. The service realigns extracted mentions, supplements supported lexical patterns, and deduplicates them. If the parsed response contains no nonempty mention surfaces, it first recovers mentions heuristically from the text.
 3. Each mention is resolved to Wikidata candidates, limited by `WIKIDATA_CANDIDATE_LIMIT`.
 4. Statements for resolved entities are fetched from Wikidata.
 5. Direct relationships among resolved entities are retained as evidence.
@@ -77,24 +77,22 @@ See [docs/prompt.md](docs/prompt.md) for the prompt structure and editing guidel
 | `OLLAMA_MODEL` | `llama3:8b` |
 | `OLLAMA_CSV_PATH` | `data/ollama_responses.csv` |
 | `OLLAMA_TIMEOUT_SECONDS` | `300` |
-| `LLM_ENTITY_EXTRACTION_ENABLED` | `true` (set to `false` to use heuristic extraction and save one LLM call) |
 | `ENTITY_MENTION_LIMIT` | `10` (lower values reduce sequential Wikidata lookups) |
 | `ANALYZE_LOG_PATH` | `data/analyze_log.jsonl` |
 
 Optional Ollama generation options are also supported: `OLLAMA_SEED`, `OLLAMA_TEMPERATURE`, `OLLAMA_TOP_K`, `OLLAMA_TOP_P`, `OLLAMA_MIN_P`, `OLLAMA_STOP`, `OLLAMA_NUM_CTX`, and `OLLAMA_NUM_PREDICT`.
 
-### Low-latency profile
+### Configured profile
 
-The checked-in `.env` keeps entity extraction with the LLM while reducing generation and Wikidata work:
+Entity extraction always uses the LLM. The current `.env` configures the following generation and mention limits:
 
 ```env
-LLM_ENTITY_EXTRACTION_ENABLED=true
-ENTITY_MENTION_LIMIT=3
-OLLAMA_NUM_PREDICT=512
+ENTITY_MENTION_LIMIT=16
+OLLAMA_NUM_PREDICT=1536
 OLLAMA_TEMPERATURE=0
 ```
 
-With this profile, a successful request normally makes two LLM calls: one for entity extraction and one for RDF generation. RDF generation defaults to one attempt. A client can explicitly set `max_rdf_attempts` to `2` or `3` when additional repair attempts are more important than latency.
+With this profile, a successful request normally makes two LLM calls: one for entity extraction and one for RDF generation. RDF generation defaults to one attempt. A client can explicitly set `max_rdf_attempts` to `2` or `3` when additional repair attempts are needed. When deterministic RDF is explicitly preferred and succeeds, only the entity-extraction LLM call is made.
 
 ## Run
 

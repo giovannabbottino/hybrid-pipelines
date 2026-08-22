@@ -12,9 +12,8 @@ The application loads `.env` when running locally and also accepts regular envir
 - `OLLAMA_CSV_PATH=data/ollama_responses.csv`
 - `OLLAMA_TIMEOUT_SECONDS=300`
 - `OLLAMA_TEMPERATURE=0`
-- `OLLAMA_NUM_PREDICT=512`
-- `LLM_ENTITY_EXTRACTION_ENABLED=true`
-- `ENTITY_MENTION_LIMIT=3`
+- `OLLAMA_NUM_PREDICT=1536`
+- `ENTITY_MENTION_LIMIT=16`
 - `ANALYZE_LOG_PATH=data/analyze_log.jsonl`
 - `WIKIDATA_MCP_URL=https://wd-mcp.wmcloud.org/mcp/`
 - `WIKIDATA_LANGUAGE=en`
@@ -29,7 +28,7 @@ The application loads `.env` when running locally and also accepts regular envir
 
 Optional Ollama generation options are ignored when blank: `OLLAMA_SEED`, `OLLAMA_TEMPERATURE`, `OLLAMA_TOP_K`, `OLLAMA_TOP_P`, `OLLAMA_MIN_P`, `OLLAMA_STOP`, `OLLAMA_NUM_CTX`, and `OLLAMA_NUM_PREDICT`.
 
-The values above are the checked-in low-latency profile. Entity extraction remains assigned to the LLM, so the normal successful path uses two LLM calls. Limiting mentions to 3 reduces sequential Wikidata lookups, `OLLAMA_NUM_PREDICT=512` bounds RDF output length, and `OLLAMA_TEMPERATURE=0` favors deterministic Turtle.
+Entity extraction is always assigned to the LLM, so the normal successful path uses two LLM calls. The configured mention limit is 16, `OLLAMA_NUM_PREDICT=1536` bounds RDF output length, and `OLLAMA_TEMPERATURE=0` reduces sampling variability.
 
 `POST /analyze` uses one RDF attempt by default. Set `max_rdf_attempts` to `2` or `3` in an individual request only when model-based RDF repair is worth the additional latency.
 

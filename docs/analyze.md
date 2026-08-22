@@ -51,9 +51,9 @@ Fields:
 1. Load the system prompt and entity extraction prompt.
 2. Replace `${TEXT}` with the request text.
 3. Ask the LLM to return strict JSON with entity/concept mentions.
-4. Parse the JSON response, recover JSON embedded in prose when possible, and ignore invalid extraction output.
-5. Add heuristic mentions from non-stopword tokens in the input text.
-6. Deduplicate mentions and keep at most `ENTITY_MENTION_LIMIT` (3 in the checked-in low-latency `.env`; the application default is 10).
+4. Parse the JSON response and recover JSON embedded in prose when possible. If no usable mentions are returned, recover mentions from non-stopword tokens in the input text.
+5. Realign model mentions to the text and supplement supported descriptor and numbered-concept patterns.
+6. Deduplicate mentions and keep at most `ENTITY_MENTION_LIMIT` (16 in the current `.env`; the application default is 10).
 7. Resolve mentions through Wikidata MCP `search_items`; when enabled, merge candidates from the Wikidata Action API fallback.
 8. Fetch statements for resolved entities through MCP `get_statements`; when enabled, use the Action API fallback if MCP fails.
 9. Keep direct relationships where an entity statement points to another resolved entity.
