@@ -2,6 +2,29 @@
 
 Flask API that builds a knowledge graph by combining LLM prompts with Wikidata evidence. The service extracts entity mentions from input text, resolves them exclusively through Wikidata MCP, finds direct relationships among resolved entities, and asks the LLM to generate RDF/Turtle. Dependency or validation failures are returned explicitly; the pipeline has no alternate data source or local recovery path.
 
+This is the most explicitly grounded variant in the evaluation workspace. In
+contrast with the prompt-only and ontology-focused services, it materializes
+resolved entities, statements, and direct relationships before RDF generation.
+
+## Quick start
+
+Requirements: Python 3.10 or newer, Ollama with `llama3.1:8b`, and outbound
+HTTPS access to the configured Wikidata MCP endpoint.
+
+```bash
+ollama pull llama3.1:8b
+python -m pip install -e ".[test,lint]"
+python -m hybrid_pipelines
+```
+
+In another terminal:
+
+```bash
+curl -X POST http://127.0.0.1:5050/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"text":"Mango is a tropical fruit.","max_rdf_attempts":3}'
+```
+
 ## Flow
 
 1. The LLM extracts entity and concept mentions from the input text.
@@ -34,9 +57,14 @@ Request:
 {
   "text": "Mango is not a fruit from a tree.",
   "idempotence_key": "optional-stable-key",
-  "max_rdf_attempts": 1
+  "max_rdf_attempts": 3,
+  "max_processing_seconds": 540
 }
 ```
+
+`max_rdf_attempts` is clamped to 1-3 and defaults to 3.
+`max_processing_seconds` optionally overrides the service-wide processing
+budget for that request.
 
 Response:
 
@@ -81,6 +109,7 @@ See [docs/prompt.md](docs/prompt.md) for the prompt structure and editing guidel
 | `OLLAMA_CSV_PATH` | `data/ollama_responses.csv` |
 | `OLLAMA_TIMEOUT_SECONDS` | `300` |
 | `ENTITY_MENTION_LIMIT` | `10` (lower values reduce sequential Wikidata lookups) |
+| `ANALYZE_TIMEOUT_SECONDS` | `540` |
 | `ANALYZE_LOG_PATH` | `data/analyze_log.jsonl` |
 
 Optional Ollama generation options are also supported: `OLLAMA_SEED`, `OLLAMA_TEMPERATURE`, `OLLAMA_TOP_K`, `OLLAMA_TOP_P`, `OLLAMA_MIN_P`, `OLLAMA_STOP`, `OLLAMA_NUM_CTX`, and `OLLAMA_NUM_PREDICT`.
@@ -95,7 +124,11 @@ OLLAMA_NUM_PREDICT=1536
 OLLAMA_TEMPERATURE=0
 ```
 
-With this profile, a successful request normally makes two LLM calls: one for entity extraction and one for RDF generation. RDF generation defaults to one attempt. A client can explicitly set `max_rdf_attempts` to `2` or `3` to retry the same LLM stage after strict validation errors. When deterministic RDF is explicitly selected as the primary generation mode, only the entity-extraction LLM call is made; failure in that mode is returned directly and does not switch to LLM generation.
+With this profile, a successful request normally makes two LLM calls: one for
+entity extraction and one for RDF generation. A client can set
+`max_rdf_attempts` from `1` to `3`; retries repeat only the model-based RDF stage
+after strict parser feedback. The service does not repair invalid Turtle or
+substitute a deterministic graph locally.
 
 ## Run
 
@@ -107,3 +140,11 @@ python -m hybrid_pipelines
 The service listens on `http://127.0.0.1:5050`.
 
 See [docs/how-to-run.md](docs/how-to-run.md) for Docker Compose and local setup details.
+
+Run the checks with:
+
+```bash
+python -m pytest
+python -m ruff check .
+python -m pyright
+```
