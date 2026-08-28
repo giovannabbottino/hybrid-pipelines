@@ -8,36 +8,32 @@ The application loads `.env` when running locally and also accepts regular envir
 - `ENTITY_EXTRACTION_PROMPT_NAME=prompts/entity-extraction.txt`
 - `RDF_BUILD_PROMPT_NAME=prompts/rdf-build.txt`
 - `OLLAMA_API_URL=http://localhost:11434`
-- `OLLAMA_MODEL=llama3:8b`
+- `OLLAMA_MODEL=llama3.1:8b`
 - `OLLAMA_CSV_PATH=data/ollama_responses.csv`
 - `OLLAMA_TIMEOUT_SECONDS=300`
 - `OLLAMA_TEMPERATURE=0`
-- `OLLAMA_NUM_PREDICT=512`
-- `LLM_ENTITY_EXTRACTION_ENABLED=true`
-- `ENTITY_MENTION_LIMIT=3`
+- `OLLAMA_NUM_PREDICT=1536`
+- `ENTITY_MENTION_LIMIT=16`
 - `ANALYZE_LOG_PATH=data/analyze_log.jsonl`
 - `WIKIDATA_MCP_URL=https://wd-mcp.wmcloud.org/mcp/`
 - `WIKIDATA_LANGUAGE=en`
 - `WIKIDATA_TIMEOUT_SECONDS=60`
-- `WIKIDATA_ACTION_API_URL=https://www.wikidata.org/w/api.php`
 - `WIKIDATA_CANDIDATE_LIMIT=3`
-- `WIKIDATA_ALLOW_ACTION_API_FALLBACK=true`
 - `WIKIDATA_USER_AGENT=hybrid-pipelines-agent/1.0`
-- `WIKIDATA_MAXLAG=5`
 - `WIKIDATA_MAX_RETRIES=2`
 - `WIKIDATA_RETRY_BACKOFF_SECONDS=2`
 
 Optional Ollama generation options are ignored when blank: `OLLAMA_SEED`, `OLLAMA_TEMPERATURE`, `OLLAMA_TOP_K`, `OLLAMA_TOP_P`, `OLLAMA_MIN_P`, `OLLAMA_STOP`, `OLLAMA_NUM_CTX`, and `OLLAMA_NUM_PREDICT`.
 
-The values above are the checked-in low-latency profile. Entity extraction remains assigned to the LLM, so the normal successful path uses two LLM calls. Limiting mentions to 3 reduces sequential Wikidata lookups, `OLLAMA_NUM_PREDICT=512` bounds RDF output length, and `OLLAMA_TEMPERATURE=0` favors deterministic Turtle.
+Entity extraction is always assigned to the LLM, so the normal successful path uses two LLM calls. The configured mention limit is 16, `OLLAMA_NUM_PREDICT=1536` bounds RDF output length, and `OLLAMA_TEMPERATURE=0` reduces sampling variability.
 
-`POST /analyze` uses one RDF attempt by default. Set `max_rdf_attempts` to `2` or `3` in an individual request only when model-based RDF repair is worth the additional latency.
+`POST /analyze` uses one RDF attempt by default. Set `max_rdf_attempts` to `2` or `3` only to repeat the same model-based RDF stage after a strict parse error.
 
 ## Requirements
 
 - Python >=3.10
 - Ollama with the configured model installed
-- Network access to Wikidata MCP or to the Wikidata Action API fallback
+- Network access to the configured Wikidata MCP endpoint
 
 ## Run with Docker Compose
 
@@ -50,7 +46,7 @@ docker compose up --build -d hybrid-pipelines
 On first run, pull the configured model into the Ollama container:
 
 ```powershell
-docker exec -it kg-ollama ollama pull llama3:8b
+docker exec -it kg-ollama ollama pull llama3.1:8b
 ```
 
 Check the service:
@@ -101,7 +97,7 @@ pip install -r requirements.txt
 ### 2. Configure Ollama
 
 ```bash
-ollama pull llama3:8b
+ollama pull llama3.1:8b
 ollama serve
 ```
 
@@ -112,14 +108,9 @@ The default MCP endpoint is:
 ```powershell
 $env:WIKIDATA_MCP_URL="https://wd-mcp.wmcloud.org/mcp/"
 $env:WIKIDATA_USER_AGENT="hybrid-pipelines-agent/1.0"
-$env:WIKIDATA_MAXLAG="5"
 ```
 
-The client also supports a Wikidata Action API fallback. Disable it only when you want MCP failures to fail the request immediately:
-
-```powershell
-$env:WIKIDATA_ALLOW_ACTION_API_FALLBACK="false"
-```
+Wikidata MCP is mandatory and is the only evidence source. If it is unavailable, the request fails explicitly.
 
 ### 4. Run the API
 
@@ -133,5 +124,5 @@ The service listens on `http://127.0.0.1:5050`.
 
 - `/health` returns `503`: inspect the `llm` and `wikidata_mcp` sections to see which dependency is unavailable.
 - Ollama timeout: increase `OLLAMA_TIMEOUT_SECONDS` or reduce `OLLAMA_NUM_PREDICT`.
-- Wikidata timeout or rate limiting: increase `WIKIDATA_TIMEOUT_SECONDS`, keep a descriptive `WIKIDATA_USER_AGENT`, and leave `WIKIDATA_MAXLAG` enabled.
+- Wikidata timeout or rate limiting: increase `WIKIDATA_TIMEOUT_SECONDS`, keep a descriptive `WIKIDATA_USER_AGENT`, or adjust the MCP retry settings.
 - Empty or weak RDF: inspect `ANALYZE_LOG_PATH` and `OLLAMA_CSV_PATH` to see entity extraction output, resolved entities, and RDF prompt content.

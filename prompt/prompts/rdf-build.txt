@@ -29,7 +29,7 @@ Requirements:
 - Use rdfs:label for every wd:Q... entity that appears in the graph.
 - Use rdfs:label for every kg: generated entity, concept, class, place, person, organization, event, and object that appears as a subject or object.
 - Labels are mandatory graph data, not optional documentation: emit the rdfs:label triple in the same Turtle response as the relationship triples.
-- For resolved entities, use `mention.surface` as the primary rdfs:label because it is the human-readable wording from the input text. Use the Wikidata `label` only as a fallback when `mention.surface` is empty.
+- For resolved entities, use `mention.surface` as the rdfs:label because it is the human-readable wording from the input text. Every provided resolved entity has a nonempty mention surface.
 - A QID is only the resource identifier and MUST NOT be used as label text. Never emit labels such as `"Q42"`, `"wd:Q42"`, or any value copied or derived from an entity `id`.
 - Every `rdfs:label` value must be a human-readable entity name taken from `mention.surface`, the entity `label`, `subject_label`, or `object_label`, in that priority when the fields apply.
 - If no human-readable name is available for a resource, do not invent a label and do not substitute its QID as the label.

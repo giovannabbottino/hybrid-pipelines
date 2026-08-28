@@ -19,10 +19,7 @@ class WikidataMCPConfig:
     url: str = "https://wd-mcp.wmcloud.org/mcp/"
     language: str = "en"
     timeout_seconds: float = 60.0
-    action_api_url: str = "https://www.wikidata.org/w/api.php"
     user_agent: str = "hybrid-pipelines-agent/1.0"
-    allow_action_api_fallback: bool = True
-    maxlag: int = 5
     max_retries: int = 2
     retry_backoff_seconds: float = 2.0
 
@@ -32,10 +29,7 @@ class WikidataMCPConfig:
             url=os.getenv("WIKIDATA_MCP_URL", "https://wd-mcp.wmcloud.org/mcp/"),
             language=os.getenv("WIKIDATA_LANGUAGE", "en"),
             timeout_seconds=_float_env("WIKIDATA_TIMEOUT_SECONDS", 60.0),
-            action_api_url=os.getenv("WIKIDATA_ACTION_API_URL", "https://www.wikidata.org/w/api.php"),
             user_agent=os.getenv("WIKIDATA_USER_AGENT", "hybrid-pipelines-agent/1.0"),
-            allow_action_api_fallback=_bool_env("WIKIDATA_ALLOW_ACTION_API_FALLBACK", True),
-            maxlag=_int_env("WIKIDATA_MAXLAG", 5),
             max_retries=_int_env("WIKIDATA_MAX_RETRIES", 2),
             retry_backoff_seconds=_float_env("WIKIDATA_RETRY_BACKOFF_SECONDS", 2.0),
         )
@@ -46,8 +40,7 @@ class WikidataMCPClient:
     Small client for the hosted Wikidata MCP streamable HTTP endpoint.
 
     The configured MCP server exposes tools such as search_items and
-    get_statements. A Wikidata Action API fallback keeps local tests and
-    development useful when the hosted MCP cannot be reached.
+    get_statements. All Wikidata evidence is obtained through this endpoint.
     """
 
     def __init__(self, config: WikidataMCPConfig):
@@ -109,36 +102,19 @@ class WikidataMCPClient:
         return entities
 
     def search_items(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
-        items: list[dict[str, Any]] = []
-        try:
-            result = self._call_tool("search_items", {"query": query, "lang": self.config.language})
-            items = _coerce_items(result)
-        except requests.RequestException:
-            if not self.config.allow_action_api_fallback:
-                raise
-        if self.config.allow_action_api_fallback:
-            try:
-                items = _merge_candidates(self._search_items_action_api(query=query, limit=limit), items)
-            except requests.RequestException:
-                if not items:
-                    raise
-        return items[:limit]
+        result = self._call_tool("search_items", {"query": query, "lang": self.config.language})
+        return _coerce_items(result)[:limit]
 
     def get_statements(self, entity_id: str) -> list[dict[str, Any]]:
-        try:
-            result = self._call_tool(
-                "get_statements",
-                {
-                    "entity_id": entity_id,
-                    "include_external_ids": False,
-                    "lang": self.config.language,
-                },
-            )
-            return _coerce_statements(result)
-        except requests.RequestException:
-            if not self.config.allow_action_api_fallback:
-                raise
-            return self._get_statements_action_api(entity_id)
+        result = self._call_tool(
+            "get_statements",
+            {
+                "entity_id": entity_id,
+                "include_external_ids": False,
+                "lang": self.config.language,
+            },
+        )
+        return _coerce_statements(result)
 
     def find_relationships(self, entities: list[WikidataEntity]) -> list[WikidataRelationship]:
         by_id = {entity.id: entity for entity in entities if entity.id}
@@ -223,90 +199,15 @@ class WikidataMCPClient:
             headers["Mcp-Session-Id"] = self._session_id
         response = self._request_with_retries("POST", self.config.url, headers=headers, json=payload)
         response.raise_for_status()
-        if response.text.lstrip().startswith("data:"):
+        # Streamable HTTP responses may start with an SSE `event:` line and
+        # omit a charset. Decode them consistently before parsing `data:`.
+        response.encoding = "utf-8"
+        if response.text.lstrip().startswith(("data:", "event:")):
             return _parse_event_stream_json(response.text), response
-        return response.json(), response
-
-    def _search_items_action_api(self, query: str, limit: int) -> list[dict[str, Any]]:
-        response = self._request_with_retries(
-            "GET",
-            self.config.action_api_url,
-            params={
-                "action": "wbsearchentities",
-                "search": query,
-                "language": self.config.language,
-                "uselang": self.config.language,
-                "limit": limit,
-                "format": "json",
-                "origin": "*",
-                "maxlag": self.config.maxlag,
-            },
-            headers=self._wikimedia_headers(),
-        )
-        response.raise_for_status()
-        items: list[dict[str, Any]] = []
-        for hit in response.json().get("search") or []:
-            entity_id = hit.get("id")
-            if not entity_id:
-                continue
-            label = hit.get("label") or query
-            self._label_cache[entity_id] = label
-            items.append(
-                {
-                    "id": entity_id,
-                    "label": label,
-                    "description": hit.get("description"),
-                    "score": hit.get("pageid"),
-                }
-            )
-        return items
-
-    def _get_statements_action_api(self, entity_id: str) -> list[dict[str, Any]]:
-        response = self._request_with_retries(
-            "GET",
-            self.config.action_api_url,
-            params={
-                "action": "wbgetentities",
-                "ids": entity_id,
-                "props": "claims|labels",
-                "languages": self.config.language,
-                "format": "json",
-                "origin": "*",
-                "maxlag": self.config.maxlag,
-            },
-            headers=self._wikimedia_headers(),
-        )
-        response.raise_for_status()
-        entity = (response.json().get("entities") or {}).get(entity_id) or {}
-        label = (((entity.get("labels") or {}).get(self.config.language) or {}).get("value")) or entity_id
-        self._label_cache[entity_id] = label
-        statements: list[dict[str, Any]] = []
-        for property_id, claims in (entity.get("claims") or {}).items():
-            for claim in claims or []:
-                value = (((claim.get("mainsnak") or {}).get("datavalue") or {}).get("value"))
-                if not isinstance(value, dict):
-                    continue
-                object_id = value.get("id")
-                if not isinstance(object_id, str) or not object_id.startswith("Q"):
-                    continue
-                statements.append(
-                    {
-                        "subject_id": entity_id,
-                        "subject_label": label,
-                        "property_id": property_id,
-                        "property_label": property_id,
-                        "object_id": object_id,
-                        "object_label": self._label_cache.get(object_id, object_id),
-                    }
-                )
-        return statements
-
-    def _wikimedia_headers(self) -> dict[str, str]:
-        return {
-            "Accept": "application/json",
-            "Accept-Encoding": "gzip, deflate",
-            "User-Agent": self.config.user_agent,
-        }
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("Wikidata MCP returned a non-object JSON-RPC response.")
+        return data, response
 
     def _request_with_retries(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         attempts = max(0, self.config.max_retries) + 1
@@ -332,13 +233,6 @@ class WikidataMCPClient:
         if last_exc:
             raise last_exc
         raise requests.RequestException("Wikidata request failed.")
-
-
-def _bool_env(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value in (None, ""):
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _int_env(name: str, default: int) -> int:
@@ -372,13 +266,15 @@ def _retry_delay(response: requests.Response, default: float) -> float:
 
 
 def _parse_event_stream_json(text: str) -> dict[str, Any]:
-    for line in text.splitlines():
+    for line in reversed(text.splitlines()):
         if not line.startswith("data:"):
             continue
         payload = line.removeprefix("data:").strip()
         if payload and payload != "[DONE]":
-            return json.loads(payload)
-    return {}
+            data = json.loads(payload)
+            if isinstance(data, dict):
+                return data
+    raise ValueError("Wikidata MCP returned an event stream without JSON data.")
 
 
 def _unwrap_mcp_result(result: Any) -> Any:
@@ -406,6 +302,20 @@ def _coerce_items(result: Any) -> list[dict[str, Any]]:
                 return [item for item in result[key] if isinstance(item, dict)]
     if isinstance(result, list):
         return [item for item in result if isinstance(item, dict)]
+    if isinstance(result, str):
+        items = []
+        for line in result.splitlines():
+            match = re.match(r"^(Q\d+):\s*(.*?)(?:\s+—\s+(.*))?$", line.strip())
+            if not match:
+                continue
+            items.append(
+                {
+                    "id": match.group(1),
+                    "label": match.group(2).strip(),
+                    "description": (match.group(3) or "").strip(),
+                }
+            )
+        return items
     return []
 
 
@@ -416,20 +326,27 @@ def _coerce_statements(result: Any) -> list[dict[str, Any]]:
                 return [item for item in result[key] if isinstance(item, dict)]
     if isinstance(result, list):
         return [item for item in result if isinstance(item, dict)]
+    if isinstance(result, str):
+        statements = []
+        pattern = re.compile(
+            r"^(.*?)\s+\((Q\d+)\):\s+(.*?)\s+\((P\d+)\):\s+(.*?)\s+\((Q\d+)\)$"
+        )
+        for line in result.splitlines():
+            match = pattern.match(line.strip())
+            if not match:
+                continue
+            statements.append(
+                {
+                    "subject_label": match.group(1).strip(),
+                    "subject_id": match.group(2),
+                    "property_label": match.group(3).strip(),
+                    "property_id": match.group(4),
+                    "object_label": match.group(5).strip(),
+                    "object_id": match.group(6),
+                }
+            )
+        return statements
     return []
-
-
-def _merge_candidates(primary: list[dict[str, Any]], secondary: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for item in [*primary, *secondary]:
-        entity_id = _entity_id(item)
-        key = entity_id or json.dumps(item, sort_keys=True)
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(item)
-    return merged
 
 
 def _entity_id(item: dict[str, Any]) -> str | None:

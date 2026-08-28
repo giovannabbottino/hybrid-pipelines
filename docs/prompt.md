@@ -55,7 +55,7 @@ Expected output:
 
 The service parses this JSON and tolerates responses that contain JSON embedded in extra text, although the prompt asks for strict JSON only. Invalid or unparsable extraction output becomes an empty extraction result.
 
-After the LLM extraction, the service adds heuristic mentions from non-stopword tokens, deduplicates mentions by surface form, and applies `ENTITY_MENTION_LIMIT`. The application default is 10; the checked-in low-latency profile uses 3. Because LLM mentions are added first, the configured limit prioritizes the model's extraction over heuristic additions.
+Entity extraction always calls the LLM. The service realigns model mentions with nonempty surfaces to the source text and supplements supported descriptor and numbered-concept patterns. When the parsed response contains no nonempty mention surfaces, it recovers mentions from non-stopword tokens before applying the same supplementation. Mentions are deduplicated by case-insensitive surface form and offsets, then limited by `ENTITY_MENTION_LIMIT`. The application default is 10, while the current `.env` uses 16.
 
 ## RDF build prompt
 
@@ -119,14 +119,14 @@ For good evaluation behavior, the RDF build prompt should keep these properties 
 
 ## Runtime cleanup and validation
 
-The RDF returned by Ollama is lightly cleaned and parsed before it is returned:
+The RDF returned by Ollama has response wrappers removed and is then parsed strictly:
 
 - fenced code blocks are unwrapped;
 - text before the first `@prefix` is removed;
 - trailing notes or explanations are removed when they start with common note markers.
-- minor syntax repairs are tried, including normalized quotes, appending a final dot, and dropping an incomplete trailing statement/block;
 - the candidate RDF is parsed with `rdflib.Graph.parse(format="turtle")`;
-- when parsing fails and attempts remain, the model is asked to return corrected Turtle using the parser error and previous invalid RDF. The API defaults to one attempt, so this extra LLM call occurs only when the client requests two or three attempts.
+- when parsing fails and attempts remain, the same model stage is asked to return corrected Turtle using the parser error and previous invalid RDF. The API defaults to three attempts;
+- no local syntax repair, statement salvage, or deterministic substitute is used after an LLM failure.
 
 If every attempt fails, the API returns an RDF parse error instead of invalid Turtle.
 

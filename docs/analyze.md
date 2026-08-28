@@ -15,7 +15,7 @@ Example response:
 {
   "llm": {
     "status": "ok",
-    "model": "llama3:8b"
+    "model": "llama3.1:8b"
   },
   "wikidata_mcp": {
     "status": "ok",
@@ -34,7 +34,7 @@ Runs the hybrid Wikidata-grounded knowledge graph pipeline.
 {
   "text": "Mango is not a fruit from a tree.",
   "idempotence_key": "optional-stable-key",
-  "max_rdf_attempts": 1
+  "max_rdf_attempts": 3
 }
 ```
 
@@ -44,22 +44,24 @@ Fields:
 |-------|----------|-------------|
 | `text` | Yes | Source text to analyze. Leading and trailing whitespace is stripped. |
 | `idempotence_key` | No | Stable key used to group events in `ANALYZE_LOG_PATH`. If omitted, the service generates a UUID. |
-| `max_rdf_attempts` | No | Number of RDF generation/repair attempts, clamped from 1 to 3. Defaults to 1 for lower latency. |
+| `max_rdf_attempts` | No | Number of RDF generation attempts, clamped from 1 to 3. Defaults to 3. Every retry uses the same LLM stage. |
 
 ### Behavior
 
 1. Load the system prompt and entity extraction prompt.
 2. Replace `${TEXT}` with the request text.
 3. Ask the LLM to return strict JSON with entity/concept mentions.
-4. Parse the JSON response, recover JSON embedded in prose when possible, and ignore invalid extraction output.
-5. Add heuristic mentions from non-stopword tokens in the input text.
-6. Deduplicate mentions and keep at most `ENTITY_MENTION_LIMIT` (3 in the checked-in low-latency `.env`; the application default is 10).
-7. Resolve mentions through Wikidata MCP `search_items`; when enabled, merge candidates from the Wikidata Action API fallback.
-8. Fetch statements for resolved entities through MCP `get_statements`; when enabled, use the Action API fallback if MCP fails.
+4. Strictly parse the JSON response. Invalid JSON, a non-object response, or no usable mentions fails the request.
+5. Realign model mentions to the text and supplement supported descriptor and numbered-concept patterns.
+6. Deduplicate mentions and keep at most `ENTITY_MENTION_LIMIT` (16 in the current `.env`; the application default is 10).
+7. Resolve mentions through Wikidata MCP `search_items`.
+8. Fetch statements for resolved entities through MCP `get_statements`.
+
+Wikidata MCP is the only evidence source. An MCP failure fails the request.
 9. Keep direct relationships where an entity statement points to another resolved entity.
 10. Load the RDF build prompt, inject a JSON payload with text, source attribution, compact entities, and relationships.
 11. Ask the LLM to return RDF/Turtle and strip code fences or trailing notes when present.
-12. Validate the RDF with `rdflib.Graph.parse(format="turtle")` and try minor local repairs. Retry the model with parser feedback only when `max_rdf_attempts` is greater than 1.
+12. Strictly validate the RDF with `rdflib.Graph.parse(format="turtle")`. Retry the same model stage with parser feedback only when `max_rdf_attempts` is greater than 1; no local RDF repair or deterministic substitute is attempted.
 13. Return the analysis response and write request events/LLM CSV logs when configured.
 
 ### Success response
@@ -98,7 +100,7 @@ Fields:
   "rdf": "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n@prefix wd: <http://www.wikidata.org/entity/> .\n@prefix kg: <https://example.org/wikidata-description/> .\n...",
   "source_attribution": "Source: Wikidata",
   "llm": {
-    "entity_extraction": "{\"entities\": []}"
+    "entity_extraction": "{\"entities\":[{\"surface\":\"Mango\",\"start\":0,\"end\":5}]}"
   }
 }
 ```
@@ -109,7 +111,7 @@ Fields:
 |--------|-------|----------------|
 | `400` | Missing or blank `text`, or invalid local prompt path | `{ "error": "..." }` |
 | `502` | External service request failed, model request failed, or runtime generation error | `{ "error": "...", "details": "..." }` |
-| `508` | The model did not return valid Turtle RDF after the configured attempts | `{ "error": "rdf parse errror", "attempts": 1, "details": "..." }` |
+| `508` | The model did not return valid Turtle RDF after the configured attempts | `{ "error": "rdf parse errror", "attempts": 3, "details": "..." }` |
 | `504` | External service timeout | `{ "error": "External service request timed out.", "details": "...", "hint": "..." }` |
 
 ## Logs
