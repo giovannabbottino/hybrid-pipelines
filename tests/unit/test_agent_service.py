@@ -6,6 +6,7 @@ from rdflib import Graph, URIRef
 
 from hybrid_pipelines.application.services import (
     HybridAgentService,
+    RDFValidationError,
     _dedupe_mentions,
     _json_from_text,
     _realign_mentions,
@@ -95,7 +96,7 @@ def test_agent_extracts_entities_resolves_wikidata_and_builds_rdf():
     assert response.rdf.startswith("@prefix")
 
 
-def test_agent_uses_heuristic_mentions_when_llm_returns_no_entities():
+def test_agent_rejects_empty_llm_entity_extraction_without_heuristic_fallback():
     class EmptyExtractionLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "entity_extraction":
@@ -112,11 +113,11 @@ def test_agent_uses_heuristic_mentions_when_llm_returns_no_entities():
         mention_limit=3,
     )
 
-    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
+    with pytest.raises(ValueError, match="no usable entity mentions"):
+        service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
 
-    assert [call["stage"] for call in llm.calls] == ["entity_extraction", "rdf_build"]
-    assert [entity.mention.surface for entity in response.entities] == ["Mango", "fruit", "tree"]
-    assert json.loads(response.llm["entity_extraction"]) == {"entities": []}
+    assert [call["stage"] for call in llm.calls] == ["entity_extraction"]
+    assert wikidata.mentions is None
 
 
 def test_agent_does_not_add_heuristic_words_when_llm_found_entities():
@@ -166,12 +167,14 @@ def test_dedupe_keeps_repeated_surface_at_distinct_offsets_for_ambiguity():
     assert [(item.start, item.end) for item in deduped] == [(0, 6), (150, 156)]
 
 
-def test_entity_json_parser_recovers_truncated_wrapper_and_top_level_array():
+def test_entity_json_parser_rejects_malformed_or_non_object_responses():
     truncated = '{"entities": [{"surface": "Apple Records", "start": 20, "end": 33}]'
     top_level = '[{"surface": "technology"}]'
 
-    assert _json_from_text(truncated)["entities"][0]["surface"] == "Apple Records"
-    assert _json_from_text(top_level)["entities"][0]["surface"] == "technology"
+    with pytest.raises(json.JSONDecodeError):
+        _json_from_text(truncated)
+    with pytest.raises(ValueError, match="JSON object"):
+        _json_from_text(top_level)
 
 
 def test_realign_mentions_uses_successive_exact_occurrences():
@@ -227,7 +230,7 @@ def test_agent_retries_until_rdf_is_valid():
     assert "previous answer was not valid Turtle RDF" in rdf_prompts[1]
 
 
-def test_agent_uses_deterministic_fallback_when_rdf_has_only_prefixes():
+def test_agent_retries_llm_when_rdf_has_only_prefixes():
     class PrefixOnlyRetryLLM(StubLLM):
         def __init__(self):
             super().__init__()
@@ -261,10 +264,10 @@ def test_agent_uses_deterministic_fallback_when_rdf_has_only_prefixes():
     rdf_prompts = [call["prompt"] for call in llm.calls if call["stage"] == "rdf_build"]
     assert 'rdfs:label "Mango"' in response.rdf
     assert "kg:is" in response.rdf
-    assert len(rdf_prompts) == 1
+    assert len(rdf_prompts) == 2
 
 
-def test_agent_repairs_doubled_literal_quotes():
+def test_agent_rejects_doubled_literal_quotes_without_local_repair():
     class QuoteRepairLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "rdf_build":
@@ -282,12 +285,10 @@ def test_agent_repairs_doubled_literal_quotes():
         prompt_repository=StubPromptRepository(),
     )
 
-    response = service.analyze(
-        AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3)
-    )
-
-    assert '""Mango""' not in response.rdf
-    assert '"Mango"' in response.rdf
+    with pytest.raises(RDFValidationError):
+        service.analyze(
+            AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3)
+        )
 
 
 def test_agent_adds_missing_labels_for_every_entity_resource():
@@ -457,7 +458,7 @@ def test_supplement_mentions_adds_explicit_descriptor_concepts():
     assert {"sports car", "24", "technology", "trade", "record"} <= surfaces
 
 
-def test_agent_uses_deterministic_rdf_when_llm_turtle_is_always_invalid():
+def test_agent_rejects_invalid_llm_turtle_without_deterministic_fallback():
     class InvalidRDFLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "rdf_build":
@@ -476,36 +477,12 @@ def test_agent_uses_deterministic_rdf_when_llm_turtle_is_always_invalid():
         prompt_repository=StubPromptRepository(),
     )
 
-    response = service.analyze(
-        AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3)
-    )
-
-    graph = Graph().parse(data=response.rdf, format="turtle")
-    wd = "http://www.wikidata.org/entity/"
-    kg = "https://example.org/wikidata-description/"
-    assert (URIRef(f"{wd}Q1054564"), URIRef(f"{kg}is"), URIRef(f"{wd}Q1364")) in graph
-    assert len([call for call in llm.calls if call["stage"] == "rdf_build"]) == 1
-
-def test_agent_can_prefer_deterministic_rdf_without_rdf_llm_call():
-    llm = StubLLM()
-    service = HybridAgentService(
-        llm=llm,
-        wikidata=StubWikidata(),
-        prompt_repository=StubPromptRepository(),
-    )
-
-    response = service.analyze(
-        AnalyzeRequest(
-            text="Mango is not a fruit from a tree.",
-            prefer_deterministic_rdf=True,
+    with pytest.raises(RDFValidationError):
+        service.analyze(
+            AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3)
         )
-    )
 
-    graph = Graph().parse(data=response.rdf, format="turtle")
-    wd = "http://www.wikidata.org/entity/"
-    kg = "https://example.org/wikidata-description/"
-    assert (URIRef(f"{wd}Q1054564"), URIRef(f"{kg}is"), URIRef(f"{wd}Q1364")) in graph
-    assert [call["stage"] for call in llm.calls] == ["entity_extraction"]
+    assert len([call for call in llm.calls if call["stage"] == "rdf_build"]) == 3
 
 def test_supplement_mentions_prioritizes_name_and_label_descriptors():
     text = (

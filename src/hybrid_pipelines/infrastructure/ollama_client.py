@@ -36,7 +36,7 @@ def _float_env(name: str) -> float | None:
 @dataclass(frozen=True)
 class OllamaClientConfig:
     url: str = "http://localhost:11434"
-    model: str = "llama3:8b"
+    model: str = "llama3.1:8b"
     csv_path: Path = Path("data/ollama_responses.csv")
     timeout_seconds: float = 300.0
     options: dict[str, Any] = field(default_factory=dict)
@@ -62,7 +62,7 @@ class OllamaClientConfig:
 
         return cls(
             url=os.getenv("OLLAMA_API_URL", "http://localhost:11434"),
-            model=os.getenv("OLLAMA_MODEL", "llama3:8b"),
+            model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
             csv_path=Path(os.getenv("OLLAMA_CSV_PATH", "data/ollama_responses.csv")),
             timeout_seconds=_float_env("OLLAMA_TIMEOUT_SECONDS") or 300.0,
             options=options,

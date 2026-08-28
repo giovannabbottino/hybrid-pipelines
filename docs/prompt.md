@@ -119,14 +119,14 @@ For good evaluation behavior, the RDF build prompt should keep these properties 
 
 ## Runtime cleanup and validation
 
-The RDF returned by Ollama is lightly cleaned and parsed before it is returned:
+The RDF returned by Ollama has response wrappers removed and is then parsed strictly:
 
 - fenced code blocks are unwrapped;
 - text before the first `@prefix` is removed;
 - trailing notes or explanations are removed when they start with common note markers.
-- minor syntax repairs are tried, including normalized quotes, appending a final dot, and dropping an incomplete trailing statement/block;
 - the candidate RDF is parsed with `rdflib.Graph.parse(format="turtle")`;
-- when parsing fails and attempts remain, the model is asked to return corrected Turtle using the parser error and previous invalid RDF. The API defaults to one attempt, so this extra LLM call occurs only when the client requests two or three attempts.
+- when parsing fails and attempts remain, the same model stage is asked to return corrected Turtle using the parser error and previous invalid RDF. The API defaults to three attempts;
+- no local syntax repair, statement salvage, or deterministic substitute is used after an LLM failure.
 
 If every attempt fails, the API returns an RDF parse error instead of invalid Turtle.
 

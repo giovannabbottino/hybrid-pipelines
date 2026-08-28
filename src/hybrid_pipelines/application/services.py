@@ -100,13 +100,8 @@ class HybridAgentService:
             entities,
             relationships,
             key,
-            getattr(request, "max_rdf_attempts", 1),
+            getattr(request, "max_rdf_attempts", 3),
             deadline,
-            prefer_deterministic=getattr(
-                request,
-                "prefer_deterministic_rdf",
-                False,
-            ),
         )
         self._log(key, "rdf_built", {"rdf": rdf})
 
@@ -139,10 +134,14 @@ class HybridAgentService:
         self._log(key, "llm_entity_response", {"response": raw})
 
         payload = _json_from_text(raw)
-        items = payload.get("entities") if isinstance(payload, dict) else None
-        mentions = [_mention_from_item(item) for item in items or [] if isinstance(item, dict)]
+        items = payload["entities"]
+        mentions = [_mention_from_item(item) for item in items if isinstance(item, dict)]
         mentions = [mention for mention in mentions if mention.surface]
-        mentions = _heuristic_mentions(text) if not mentions else _realign_mentions(text, mentions)
+        if not mentions:
+            raise ValueError("The LLM returned no usable entity mentions.")
+        mentions = _realign_mentions(text, mentions)
+        if not mentions:
+            raise ValueError("The LLM entity mentions do not occur in the input text.")
         mentions = _supplement_mentions(text, mentions, self.mention_limit)
         return _dedupe_mentions(mentions)[: self.mention_limit], raw
 
@@ -154,77 +153,30 @@ class HybridAgentService:
         key: str,
         max_attempts: int,
         deadline: float | None = None,
-        prefer_deterministic: bool = False,
     ) -> str:
         attempts = max(1, min(int(max_attempts or 3), 3))
         last_error = None
 
-        if prefer_deterministic:
-            try:
-                deterministic_rdf = _build_deterministic_rdf(
-                    text,
-                    entities,
-                    relationships,
-                )
-                _parse_rdf(deterministic_rdf)
-                self._log(
-                    key,
-                    "rdf_validated",
-                    {
-                        "attempt": 0,
-                        "repair_method": "deterministic_primary",
-                    },
-                )
-                return deterministic_rdf
-            except Exception as exc:
-                last_error = f"deterministic primary: {exc}"
-
         prompt = self._build_rdf_prompt(text, entities, relationships)
         for attempt in range(1, attempts + 1):
             rdf = self._build_rdf(prompt, key, deadline)
-            for repair_method, candidate_rdf in _rdf_repair_candidates(rdf):
-                try:
-                    _parse_rdf(candidate_rdf)
-                    candidate_rdf = _ensure_entity_labels(
-                        candidate_rdf,
-                        text,
-                        entities,
-                        relationships,
-                    )
-                    self._log(
-                        key,
-                        "rdf_validated",
-                        {"attempt": attempt, "repair_method": repair_method},
-                    )
-                    return candidate_rdf
-                except Exception as exc:  # rdflib raises parser-specific exception classes.
-                    last_error = str(exc)
-
             try:
-                fallback_rdf = _build_deterministic_rdf(
+                _parse_rdf(rdf)
+                rdf = _ensure_entity_labels(
+                    rdf,
                     text,
                     entities,
                     relationships,
                 )
-                _parse_rdf(fallback_rdf)
+                _parse_rdf(rdf)
                 self._log(
                     key,
                     "rdf_validated",
-                    {
-                        "attempt": attempt,
-                        "repair_method": "deterministic_fallback",
-                        "previous_error": last_error,
-                    },
+                    {"attempt": attempt, "validation_method": "strict"},
                 )
-                return fallback_rdf
-            except Exception as exc:
-                fallback_error = str(exc)
-                if last_error:
-                    last_error = (
-                        f"{last_error}; deterministic fallback: {fallback_error}"
-                    )
-                else:
-                    last_error = f"deterministic fallback: {fallback_error}"
+                return rdf
+            except Exception as exc:  # rdflib raises parser-specific exception classes.
+                last_error = str(exc)
 
             if attempt < attempts:
                 prompt = _build_retry_prompt(
@@ -284,33 +236,12 @@ class HybridAgentService:
 
 
 def _json_from_text(text: str) -> dict[str, Any]:
-    def payload_from(value: Any) -> dict[str, Any]:
-        if isinstance(value, dict):
-            return value
-        if isinstance(value, list):
-            return {"entities": value}
-        return {}
-
-    try:
-        return payload_from(json.loads(text))
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if match:
-            try:
-                return payload_from(json.loads(match.group(0)))
-            except json.JSONDecodeError:
-                pass
-
-        entities_start = re.search(r'"entities"\s*:\s*', text)
-        array_start = text.find("[", entities_start.end() if entities_start else 0)
-        array_end = text.rfind("]")
-        if array_start >= 0 and array_end > array_start:
-            try:
-                entities = json.loads(text[array_start : array_end + 1])
-                return payload_from(entities)
-            except json.JSONDecodeError:
-                pass
-        return {}
+    payload = json.loads(text)
+    if not isinstance(payload, dict):
+        raise ValueError("The LLM entity response must be a JSON object.")
+    if not isinstance(payload.get("entities"), list):
+        raise ValueError("The LLM entity response must contain an entities array.")
+    return payload
 
 
 def _mention_from_item(item: dict[str, Any]) -> EntityMention:
@@ -339,25 +270,6 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
-
-
-def _heuristic_mentions(text: str) -> list[EntityMention]:
-    mentions: list[EntityMention] = []
-    stopwords = {"a", "an", "the", "is", "are", "was", "were", "not", "from", "of", "in", "on", "to"}
-    for match in re.finditer(r"\b[A-Za-z][A-Za-z-]*\b", text):
-        surface = match.group(0)
-        if surface.casefold() in stopwords:
-            continue
-        mentions.append(
-            EntityMention(
-                surface=surface,
-                start=match.start(),
-                end=match.end(),
-                entity_type="Entity",
-                confidence=0.2,
-            )
-        )
-    return mentions
 
 
 _DESCRIPTOR_HEADS = (
@@ -513,47 +425,6 @@ def _parse_rdf(rdf_text: str) -> None:
     # Prefix declarations alone parse successfully but produce an empty graph.
     if len(graph) == 0:
         raise ValueError("RDF response contains no triples.")
-
-
-def _build_deterministic_rdf(
-    text: str,
-    entities: list[WikidataEntity],
-    relationships: list[WikidataRelationship],
-) -> str:
-    """Build a valid evidence-only graph when every LLM Turtle attempt is invalid."""
-    graph = Graph()
-    wd = Namespace("http://www.wikidata.org/entity/")
-    graph.bind("rdfs", RDFS)
-    graph.bind("wd", wd)
-
-    for entity in entities:
-        if not entity.id or not re.fullmatch(r"Q\d+", entity.id):
-            continue
-        label = (
-            _human_readable_label(entity.mention.surface)
-            or _human_readable_label(entity.label)
-        )
-        if label:
-            graph.add((wd[entity.id], RDFS.label, Literal(label, lang="en")))
-
-    for relationship in relationships:
-        for entity_id, raw_label in (
-            (relationship.subject_id, relationship.subject_label),
-            (relationship.object_id, relationship.object_label),
-        ):
-            label = _human_readable_label(raw_label)
-            if re.fullmatch(r"Q\d+", entity_id) and label:
-                graph.add((wd[entity_id], RDFS.label, Literal(label, lang="en")))
-
-    if len(graph) == 0:
-        raise ValueError("No resolved, human-readable entities for deterministic RDF.")
-
-    return _ensure_entity_labels(
-        graph.serialize(format="turtle"),
-        text,
-        entities,
-        relationships,
-    )
 
 
 def _ensure_entity_labels(
@@ -767,42 +638,6 @@ def _relationship_predicate(
     if not local_name:
         local_name = re.sub(r"[^a-z0-9]+", "_", label).strip("_") or "related_to"
     return kg[local_name]
-
-
-def _rdf_repair_candidates(rdf_text: str):
-    raw = (rdf_text or "").strip().replace("\r\n", "\n").replace("\r", "\n")
-    raw = raw.replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'")
-    raw = re.sub(r'""([^"\n]+)""', r'"\1"', raw)
-
-    seen = set()
-
-    def emit(method: str, value: str):
-        value = (value or "").strip()
-        if not value or value in seen:
-            return
-        seen.add(value)
-        yield method, value
-
-    yield from emit("trim", raw)
-
-    if raw and not raw.endswith("."):
-        yield from emit("append_final_dot", raw + " .")
-
-    lines = raw.splitlines()
-    last_complete_line = None
-    for idx, line in enumerate(lines):
-        if line.strip().endswith("."):
-            last_complete_line = idx
-    if last_complete_line is not None:
-        yield from emit("keep_through_last_complete_statement", "\n".join(lines[: last_complete_line + 1]))
-
-    blocks = re.split(r"\n\s*\n", raw)
-    while len(blocks) > 1:
-        blocks = blocks[:-1]
-        candidate = "\n\n".join(blocks).strip()
-        if candidate and not candidate.endswith("."):
-            candidate += " ."
-        yield from emit("drop_incomplete_last_block", candidate)
 
 
 def _build_retry_prompt(original_prompt: str, invalid_rdf: str, parser_error: str) -> str:

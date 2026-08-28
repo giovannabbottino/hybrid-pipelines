@@ -1,16 +1,16 @@
 # Hybrid Pipelines Wikidata Agent
 
-Flask API that builds a knowledge graph by combining LLM prompts with Wikidata evidence. The service extracts entity mentions from input text, resolves them through Wikidata MCP or the Wikidata Action API fallback, finds direct relationships among resolved entities, and asks the LLM to generate RDF/Turtle.
+Flask API that builds a knowledge graph by combining LLM prompts with Wikidata evidence. The service extracts entity mentions from input text, resolves them exclusively through Wikidata MCP, finds direct relationships among resolved entities, and asks the LLM to generate RDF/Turtle. Dependency or validation failures are returned explicitly; the pipeline has no alternate data source or local recovery path.
 
 ## Flow
 
 1. The LLM extracts entity and concept mentions from the input text.
-2. The service realigns extracted mentions, supplements supported lexical patterns, and deduplicates them. If the parsed response contains no nonempty mention surfaces, it first recovers mentions heuristically from the text.
+2. The service strictly parses the extraction response, realigns extracted mentions, supplements supported lexical patterns, and deduplicates them. Invalid JSON or an empty extraction fails the request.
 3. Each mention is resolved to Wikidata candidates, limited by `WIKIDATA_CANDIDATE_LIMIT`.
 4. Statements for resolved entities are fetched from Wikidata.
 5. Direct relationships among resolved entities are retained as evidence.
 6. The LLM receives the text, compact entity evidence, and relationships, then returns RDF/Turtle.
-7. The RDF is cleaned, validated with `rdflib`, and retried or lightly repaired before being returned.
+7. The RDF is normalized to remove response wrappers and strictly validated with `rdflib`. Invalid RDF is retried only through the same LLM stage when additional attempts were requested.
 
 ## Project Layout
 
@@ -43,12 +43,18 @@ Response:
 ```json
 {
   "text": "Mango is not a fruit from a tree.",
-  "entities": [],
+  "entities": [
+    {
+      "mention": {"surface": "Mango", "start": 0, "end": 5},
+      "id": "Q169",
+      "label": "mango"
+    }
+  ],
   "relationships": [],
   "rdf": "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n...",
   "source_attribution": "Source: Wikidata",
   "llm": {
-    "entity_extraction": "{\"entities\": []}"
+    "entity_extraction": "{\"entities\":[{\"surface\":\"Mango\",\"start\":0,\"end\":5}]}"
   }
 }
 ```
@@ -66,15 +72,12 @@ See [docs/prompt.md](docs/prompt.md) for the prompt structure and editing guidel
 | `WIKIDATA_MCP_URL` | `https://wd-mcp.wmcloud.org/mcp/` |
 | `WIKIDATA_LANGUAGE` | `en` |
 | `WIKIDATA_TIMEOUT_SECONDS` | `60` |
-| `WIKIDATA_ACTION_API_URL` | `https://www.wikidata.org/w/api.php` |
 | `WIKIDATA_CANDIDATE_LIMIT` | `3` |
-| `WIKIDATA_ALLOW_ACTION_API_FALLBACK` | `true` |
 | `WIKIDATA_USER_AGENT` | `hybrid-pipelines-agent/1.0` |
-| `WIKIDATA_MAXLAG` | `5` |
 | `WIKIDATA_MAX_RETRIES` | `2` |
 | `WIKIDATA_RETRY_BACKOFF_SECONDS` | `2` |
 | `OLLAMA_API_URL` | `http://localhost:11434` |
-| `OLLAMA_MODEL` | `llama3:8b` |
+| `OLLAMA_MODEL` | `llama3.1:8b` |
 | `OLLAMA_CSV_PATH` | `data/ollama_responses.csv` |
 | `OLLAMA_TIMEOUT_SECONDS` | `300` |
 | `ENTITY_MENTION_LIMIT` | `10` (lower values reduce sequential Wikidata lookups) |
@@ -92,7 +95,7 @@ OLLAMA_NUM_PREDICT=1536
 OLLAMA_TEMPERATURE=0
 ```
 
-With this profile, a successful request normally makes two LLM calls: one for entity extraction and one for RDF generation. RDF generation defaults to one attempt. A client can explicitly set `max_rdf_attempts` to `2` or `3` when additional repair attempts are needed. When deterministic RDF is explicitly preferred and succeeds, only the entity-extraction LLM call is made.
+With this profile, a successful request normally makes two LLM calls: one for entity extraction and one for RDF generation. RDF generation defaults to one attempt. A client can explicitly set `max_rdf_attempts` to `2` or `3` to retry the same LLM stage after strict validation errors. When deterministic RDF is explicitly selected as the primary generation mode, only the entity-extraction LLM call is made; failure in that mode is returned directly and does not switch to LLM generation.
 
 ## Run
 

@@ -14,7 +14,7 @@ collections "Prompt files\n(prompt/)" as PromptFiles
 database "Analyze event log\n(ANALYZE_LOG_PATH)" as EventLog
 database "Ollama CSV log\n(OLLAMA_CSV_PATH)" as CSV
 boundary "Ollama /api/generate" as Ollama
-boundary "Wikidata MCP / Action API" as Wikidata
+boundary "Wikidata MCP" as Wikidata
 
 User -> Client: Request analysis
 Client -> Controller ++: POST /analyze {"text": "...", "idempotence_key": "..."}
@@ -41,13 +41,13 @@ LLM -> CSV: append entity_extraction row
 LLM --> Agent --: raw entity extraction JSON
 
 Agent -> EventLog: append llm_entity_response
-Agent -> Agent: parse JSON, recover/realign mentions, supplement patterns, dedupe, apply configured limit
+Agent -> Agent: strictly parse JSON, realign mentions, supplement patterns, dedupe, apply configured limit
 
 loop each mention
   Agent -> WD ++: resolve entity mention
-  WD -> Wikidata ++: search_items / Action API search
+  WD -> Wikidata ++: tools/call search_items
   Wikidata --> WD --: candidate entities
-  WD -> Wikidata ++: get_statements / Action API claims
+  WD -> Wikidata ++: tools/call get_statements
   Wikidata --> WD --: statements
   WD --> Agent --: resolved WikidataEntity
 end
@@ -73,6 +73,7 @@ LLM -> CSV: append rdf_build row
 LLM --> Agent --: RDF/Turtle text
 
 Agent -> Agent: strip code fences and trailing notes
+Agent -> Agent: strictly parse Turtle; retry same LLM stage if configured
 Agent -> EventLog: append rdf_built
 
 Agent --> Controller --: AnalyzeResponse

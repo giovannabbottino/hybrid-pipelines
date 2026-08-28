@@ -28,11 +28,8 @@ def create_analyze_blueprint(service: HybridAgentService) -> Blueprint:
                 AnalyzeRequest(
                     text=text.strip(),
                     idempotence_key=payload.get("idempotence_key"),
-                    max_rdf_attempts=payload.get("max_rdf_attempts", 1),
+                    max_rdf_attempts=payload.get("max_rdf_attempts", 3),
                     max_processing_seconds=payload.get("max_processing_seconds"),
-                    prefer_deterministic_rdf=(
-                        payload.get("prefer_deterministic_rdf") is True
-                    ),
                 )
             )
         except requests.Timeout as exc:

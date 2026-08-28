@@ -8,9 +8,8 @@ from typing import Any
 class AnalyzeRequest:
     text: str
     idempotence_key: str | None = None
-    max_rdf_attempts: int = 1
+    max_rdf_attempts: int = 3
     max_processing_seconds: float | None = None
-    prefer_deterministic_rdf: bool = False
 
 
 @dataclass(frozen=True)
