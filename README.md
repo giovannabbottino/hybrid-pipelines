@@ -29,11 +29,12 @@ curl -X POST http://127.0.0.1:5050/analyze \
 
 1. The LLM extracts entity and concept mentions from the input text.
 2. The service strictly parses the extraction response, realigns extracted mentions, supplements supported lexical patterns, and deduplicates them. Invalid JSON or an empty extraction fails the request.
-3. Each mention is resolved to Wikidata candidates, limited by `WIKIDATA_CANDIDATE_LIMIT`.
-4. Statements for resolved entities are fetched from Wikidata.
-5. Direct relationships among resolved entities are retained as evidence.
-6. The LLM receives the text, compact entity evidence, and relationships, then returns RDF/Turtle.
-7. The RDF is normalized to remove response wrappers and strictly validated with `rdflib`. Invalid RDF is retried only through the same LLM stage when additional attempts were requested.
+3. Each mention is expanded to a Wikidata candidate group, limited by `WIKIDATA_CANDIDATE_LIMIT`; no candidate is selected yet.
+4. Wikidata statements are fetched for every candidate, and cross-mention paths of at most two hops are built from the bounded local subgraph. High-degree intermediate nodes are excluded.
+5. The LLM receives the original text, candidate groups, type evidence, and textual path context, then selects exactly one supplied QID per non-empty group.
+6. Direct relationships among the selected entities are retained as evidence.
+7. The LLM receives the text, selected entity evidence, and relationships, then returns RDF/Turtle.
+8. The RDF is normalized to remove response wrappers and strictly validated with `rdflib`. Invalid RDF is retried only through the same LLM stage when additional attempts were requested.
 
 ## Project Layout
 
@@ -96,11 +97,16 @@ See [docs/prompt.md](docs/prompt.md) for the prompt structure and editing guidel
 |---|---|
 | `SYSTEM_PROMPT_NAME` | `system/agent.txt` |
 | `ENTITY_EXTRACTION_PROMPT_NAME` | `prompts/entity-extraction.txt` |
+| `CANDIDATE_DISAMBIGUATION_PROMPT_NAME` | `prompts/candidate-disambiguation.txt` |
 | `RDF_BUILD_PROMPT_NAME` | `prompts/rdf-build.txt` |
 | `WIKIDATA_MCP_URL` | `https://wd-mcp.wmcloud.org/mcp/` |
 | `WIKIDATA_LANGUAGE` | `en` |
 | `WIKIDATA_TIMEOUT_SECONDS` | `60` |
 | `WIKIDATA_CANDIDATE_LIMIT` | `3` |
+| `WIKIDATA_MAX_PATH_HOPS` | `2` |
+| `WIKIDATA_HUB_DEGREE_THRESHOLD` | `25` |
+| `WIKIDATA_PATH_EXPANSION_LIMIT` | `30` |
+| `WIKIDATA_PATH_LIMIT` | `24` |
 | `WIKIDATA_USER_AGENT` | `hybrid-pipelines-agent/1.0` |
 | `WIKIDATA_MAX_RETRIES` | `2` |
 | `WIKIDATA_RETRY_BACKOFF_SECONDS` | `2` |
@@ -124,8 +130,8 @@ OLLAMA_NUM_PREDICT=1536
 OLLAMA_TEMPERATURE=0
 ```
 
-With this profile, a successful request normally makes two LLM calls: one for
-entity extraction and one for RDF generation. A client can set
+With this profile, a successful request normally makes three LLM calls: entity
+extraction, candidate disambiguation, and RDF generation. A client can set
 `max_rdf_attempts` from `1` to `3`; retries repeat only the model-based RDF stage
 after strict parser feedback. The service does not repair invalid Turtle or
 substitute a deterministic graph locally.

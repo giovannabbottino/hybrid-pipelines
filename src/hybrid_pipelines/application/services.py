@@ -3,14 +3,22 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import requests
 from rdflib import Graph, Literal, Namespace, URIRef
 from rdflib.namespace import RDF, RDFS
 
-from ..domain.models import AnalyzeRequest, AnalyzeResponse, EntityMention, WikidataEntity, WikidataRelationship
+from ..domain.models import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    EntityMention,
+    WikidataCandidateGroup,
+    WikidataEntity,
+    WikidataPath,
+    WikidataRelationship,
+)
 from ..infrastructure.request_logger import RequestLogger
 
 
@@ -58,22 +66,32 @@ class HybridAgentService:
         prompt_repository: PromptLoader,
         system_prompt_name: str = "system/agent.txt",
         entity_prompt_name: str = "prompts/entity-extraction.txt",
+        disambiguation_prompt_name: str = "prompts/candidate-disambiguation.txt",
         rdf_prompt_name: str = "prompts/rdf-build.txt",
         request_logger: RequestLogger | None = None,
         candidate_limit: int = 3,
         analyze_timeout_seconds: float = 540.0,
         mention_limit: int = 10,
+        max_path_hops: int = 2,
+        hub_degree_threshold: int = 25,
+        path_expansion_limit: int = 30,
+        path_limit: int = 24,
     ) -> None:
         self.llm = llm
         self.wikidata = wikidata
         self.prompt_repository = prompt_repository
         self.system_prompt_name = system_prompt_name
         self.entity_prompt_name = entity_prompt_name
+        self.disambiguation_prompt_name = disambiguation_prompt_name
         self.rdf_prompt_name = rdf_prompt_name
         self.request_logger = request_logger
         self.candidate_limit = max(1, int(candidate_limit))
         self.analyze_timeout_seconds = max(1.0, float(analyze_timeout_seconds))
         self.mention_limit = max(1, int(mention_limit))
+        self.max_path_hops = max(1, min(int(max_path_hops), 2))
+        self.hub_degree_threshold = max(1, int(hub_degree_threshold))
+        self.path_expansion_limit = max(0, int(path_expansion_limit))
+        self.path_limit = max(1, int(path_limit))
 
     def analyze(self, request: AnalyzeRequest) -> AnalyzeResponse:
         key = request.idempotence_key or str(uuid4())
@@ -87,7 +105,41 @@ class HybridAgentService:
 
         mentions, extraction_raw = self._extract_entities(request.text, key, deadline)
         self._ensure_not_timed_out(deadline)
-        entities = self.wikidata.resolve_entities(mentions, limit=self.candidate_limit, context=request.text)
+        candidate_search = getattr(self.wikidata, "search_candidate_groups", None)
+        path_search = getattr(self.wikidata, "find_candidate_paths", None)
+        disambiguation_raw: str | None = None
+        candidate_groups: list[WikidataCandidateGroup] = []
+        paths: list[WikidataPath] = []
+        if callable(candidate_search) and callable(path_search):
+            candidate_groups = cast(Any, candidate_search)(
+                mentions,
+                limit=self.candidate_limit,
+                context=request.text,
+            )
+            self._log(
+                key,
+                "wikidata_candidates",
+                {"candidate_groups": [_compact_candidate_group(group) for group in candidate_groups]},
+            )
+            self._ensure_not_timed_out(deadline)
+            paths = cast(Any, path_search)(
+                candidate_groups,
+                max_hops=self.max_path_hops,
+                hub_degree_threshold=self.hub_degree_threshold,
+                expansion_limit=self.path_expansion_limit,
+                path_limit=self.path_limit,
+            )
+            self._log(key, "wikidata_candidate_paths", {"paths": [path.to_dict() for path in paths]})
+            self._ensure_not_timed_out(deadline)
+            entities, disambiguation_raw = self._disambiguate_candidates(
+                request.text,
+                candidate_groups,
+                paths,
+                key,
+                deadline,
+            )
+        else:
+            entities = self.wikidata.resolve_entities(mentions, limit=self.candidate_limit, context=request.text)
         self._log(key, "wikidata_entities", {"entities": [entity.to_dict() for entity in entities]})
 
         self._ensure_not_timed_out(deadline)
@@ -105,12 +157,20 @@ class HybridAgentService:
         )
         self._log(key, "rdf_built", {"rdf": rdf})
 
+        llm_outputs = {"entity_extraction": extraction_raw}
+        if disambiguation_raw is not None:
+            llm_outputs["candidate_disambiguation"] = disambiguation_raw
         response = AnalyzeResponse(
             text=request.text,
             entities=entities,
             relationships=relationships,
             rdf=rdf,
-            llm={"entity_extraction": extraction_raw},
+            llm=llm_outputs,
+            ned={
+                "candidate_groups": [_compact_candidate_group(group) for group in candidate_groups],
+                "paths": [path.to_dict() for path in paths],
+                "path_summary": _summarize_paths(paths),
+            },
         )
         self._log(
             key,
@@ -128,6 +188,82 @@ class HybridAgentService:
             "llm": self.llm.health_check(),
             "wikidata_mcp": self.wikidata.health(),
         }
+
+    def _disambiguate_candidates(
+        self,
+        text: str,
+        groups: list[WikidataCandidateGroup],
+        paths: list[WikidataPath],
+        key: str,
+        deadline: float | None = None,
+    ) -> tuple[list[WikidataEntity], str]:
+        prompt_template = self.prompt_repository.load_prompt(self.disambiguation_prompt_name)
+        payload = {
+            "text": text,
+            "candidate_groups": [
+                {
+                    "mention_index": index,
+                    **_compact_candidate_group(group),
+                }
+                for index, group in enumerate(groups)
+            ],
+            "graph_context": _summarize_paths(paths),
+        }
+        prompt = prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
+        self._log(key, "llm_disambiguation_request", {"prompt": prompt})
+        raw = self.llm.generate(
+            system_prompt=self.prompt_repository.load_prompt(self.system_prompt_name),
+            prompt=prompt,
+            stage="candidate_disambiguation",
+            timeout_seconds=self._remaining_timeout(deadline),
+        )
+        self._log(key, "llm_disambiguation_response", {"response": raw})
+        result = json.loads(raw)
+        if not isinstance(result, dict) or not isinstance(result.get("selections"), list):
+            raise ValueError("The LLM disambiguation response must contain a selections array.")
+
+        selections: dict[int, str] = {}
+        for selection in result["selections"]:
+            if not isinstance(selection, dict):
+                continue
+            mention_index = _optional_int(selection.get("mention_index"))
+            selected_id = selection.get("selected_id")
+            if mention_index is None or not isinstance(selected_id, str):
+                continue
+            if mention_index in selections:
+                raise ValueError(f"The LLM returned duplicate selections for mention {mention_index}.")
+            selections[mention_index] = selected_id
+
+        expected_indices = {index for index, group in enumerate(groups) if group.candidates}
+        if set(selections) != expected_indices:
+            raise ValueError(
+                "The LLM disambiguation response must select every non-empty candidate group exactly once."
+            )
+
+        entities: list[WikidataEntity] = []
+        for index, group in enumerate(groups):
+            if not group.candidates:
+                entities.append(
+                    WikidataEntity(
+                        mention=group.mention,
+                        id=None,
+                        iri=None,
+                        label=group.mention.surface,
+                    )
+                )
+                continue
+            selected_id = selections.get(index)
+            selected = next(
+                (candidate for candidate in group.candidates if candidate.id == selected_id),
+                None,
+            )
+            if selected is None:
+                allowed = ", ".join(candidate.id or "" for candidate in group.candidates)
+                raise ValueError(
+                    f"The LLM selected an invalid Wikidata ID for mention {index}; allowed IDs: {allowed}."
+                )
+            entities.append(selected)
+        return entities, raw
 
     def _extract_entities(self, text: str, key: str, deadline: float | None = None) -> tuple[list[EntityMention], str]:
         system_prompt = self.prompt_repository.load_prompt(self.system_prompt_name)
@@ -418,6 +554,44 @@ def _compact_entity(entity: WikidataEntity, statement_limit: int = 8) -> dict[st
         key=lambda item: 0 if item.get("property_id") in priority else 1,
     )[:statement_limit]
     return payload
+
+
+def _compact_candidate_group(group: WikidataCandidateGroup) -> dict[str, Any]:
+    return {
+        "mention": group.mention.to_dict(),
+        "candidates": [
+            {
+                "id": candidate.id,
+                "label": candidate.label,
+                "description": candidate.description,
+                "score": candidate.score,
+                "type_statements": [
+                    statement
+                    for statement in candidate.statements
+                    if str(statement.get("property_id") or statement.get("property") or "")
+                    in {"P31", "P279"}
+                ][:4],
+            }
+            for candidate in group.candidates
+        ],
+    }
+
+
+def _summarize_paths(paths: list[WikidataPath], character_limit: int = 6000) -> str:
+    sentences: list[str] = []
+    seen: set[str] = set()
+    used = 0
+    for path in sorted(paths, key=lambda item: item.hops):
+        text = path.to_text().strip()
+        if not text or text.casefold() in seen:
+            continue
+        addition = len(text) + (1 if sentences else 0)
+        if used + addition > max(1, int(character_limit)):
+            break
+        seen.add(text.casefold())
+        sentences.append(text)
+        used += addition
+    return " ".join(sentences)
 
 
 def _strip_code_fence(text: str) -> str:

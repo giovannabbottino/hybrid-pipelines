@@ -12,6 +12,7 @@ def test_prompt_repository_loads_project_prompts():
 
     assert repository.load_prompt("system/agent.txt")
     assert repository.load_prompt("prompts/entity-extraction.txt")
+    assert repository.load_prompt("prompts/candidate-disambiguation.txt")
     assert repository.load_prompt("prompts/rdf-build.txt")
 
 
@@ -21,6 +22,15 @@ def test_entity_prompt_preserves_distinct_ambiguous_mentions():
     assert "same surface form denotes different entities" in prompt
     assert "each occurrence with its own character offsets" in prompt
     assert "at most 16 entities" in prompt
+
+
+def test_disambiguation_prompt_restricts_selections_to_supplied_candidates():
+    prompt = Path("prompt/prompts/candidate-disambiguation.txt").read_text(encoding="utf-8")
+
+    assert "exactly one selection for every candidate group" in prompt
+    assert "selected_id must be one of" in prompt
+    assert "Never invent, alter, normalize, or substitute a Wikidata ID" in prompt
+    assert "summarized graph_context" in prompt
 
 
 def test_rdf_prompt_requires_only_turtle_and_expected_prefixes():

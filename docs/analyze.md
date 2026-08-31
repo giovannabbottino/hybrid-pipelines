@@ -54,15 +54,17 @@ Fields:
 4. Strictly parse the JSON response. Invalid JSON, a non-object response, or no usable mentions fails the request.
 5. Realign model mentions to the text and supplement supported descriptor and numbered-concept patterns.
 6. Deduplicate mentions and keep at most `ENTITY_MENTION_LIMIT` (16 in the current `.env`; the application default is 10).
-7. Resolve mentions through Wikidata MCP `search_items`.
-8. Fetch statements for resolved entities through MCP `get_statements`.
+7. Retrieve a candidate group for every mention through Wikidata MCP `search_items`.
+8. Fetch statements for every candidate through MCP `get_statements` and use P31/P279 evidence to rank ontology-compatible candidates.
 
 Wikidata MCP is the only evidence source. An MCP failure fails the request.
-9. Keep direct relationships where an entity statement points to another resolved entity.
-10. Load the RDF build prompt, inject a JSON payload with text, source attribution, compact entities, and relationships.
-11. Ask the LLM to return RDF/Turtle and strip code fences or trailing notes when present.
-12. Strictly validate the RDF with `rdflib.Graph.parse(format="turtle")`. If parsing fails, retry the same model stage with both the parser error and the previous invalid RDF. Return immediately when parsing succeeds; no local RDF repair or deterministic substitute is attempted.
-13. Return the analysis response and write request events/LLM CSV logs when configured.
+9. Build paths of at most two hops between candidates from different mention groups. Intermediate nodes above the configured local-degree threshold are excluded.
+10. Translate each path to text and ask the LLM to select exactly one supplied QID for every non-empty candidate group. An unknown, missing, or cross-group QID fails the request.
+11. Keep direct relationships where a selected entity statement points to another selected entity.
+12. Load the RDF build prompt, inject a JSON payload with text, source attribution, compact selected entities, and relationships.
+13. Ask the LLM to return RDF/Turtle and strip code fences or trailing notes when present.
+14. Strictly validate the RDF with `rdflib.Graph.parse(format="turtle")`. If parsing fails, retry the same model stage with both the parser error and the previous invalid RDF. Return immediately when parsing succeeds; no local RDF repair or deterministic substitute is attempted.
+15. Return the analysis response, including auditable NED candidates and paths, and write request events/LLM CSV logs when configured.
 
 ### Success response
 
@@ -99,8 +101,13 @@ Wikidata MCP is the only evidence source. An MCP failure fails the request.
   ],
   "rdf": "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n@prefix wd: <http://www.wikidata.org/entity/> .\n@prefix kg: <https://example.org/wikidata-description/> .\n...",
   "source_attribution": "Source: Wikidata",
+  "ned": {
+    "candidate_groups": [],
+    "paths": []
+  },
   "llm": {
-    "entity_extraction": "{\"entities\":[{\"surface\":\"Mango\",\"start\":0,\"end\":5}]}"
+    "entity_extraction": "{\"entities\":[{\"surface\":\"Mango\",\"start\":0,\"end\":5}]}",
+    "candidate_disambiguation": "{\"selections\":[{\"mention_index\":0,\"selected_id\":\"Q3919027\"}]}"
   }
 }
 ```

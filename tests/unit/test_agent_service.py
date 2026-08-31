@@ -16,7 +16,9 @@ from hybrid_pipelines.application.services import (
 from hybrid_pipelines.domain.models import (
     AnalyzeRequest,
     EntityMention,
+    WikidataCandidateGroup,
     WikidataEntity,
+    WikidataPath,
     WikidataRelationship,
 )
 from hybrid_pipelines.infrastructure.request_logger import RequestLogger
@@ -82,6 +84,7 @@ class StubPromptRepository:
         prompts = {
             "system/agent.txt": "System prompt",
             "prompts/entity-extraction.txt": "Extract ${TEXT}",
+            "prompts/candidate-disambiguation.txt": "Disambiguate ${PAYLOAD}",
             "prompts/rdf-build.txt": "Build ${PAYLOAD}",
         }
         return prompts[prompt_name]
@@ -523,3 +526,93 @@ def test_supplement_mentions_prioritizes_name_and_label_descriptors():
 
     assert surfaces == ["trade", "trade name", "record", "record label"]
     assert "and" not in surfaces
+
+
+def test_agent_disambiguates_wikidata_candidates_before_building_rdf():
+    class DisambiguatingLLM(StubLLM):
+        def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
+            if stage == "candidate_disambiguation":
+                self.calls.append({"system_prompt": system_prompt, "prompt": prompt, "stage": stage})
+                return json.dumps(
+                    {
+                        "selections": [
+                            {"mention_index": 0, "selected_id": "Q1054564"},
+                            {"mention_index": 1, "selected_id": "Q1364"},
+                            {"mention_index": 2, "selected_id": "Q10884"},
+                        ]
+                    }
+                )
+            return super().generate(system_prompt, prompt, stage, timeout_seconds)
+
+    class CandidateWikidata(StubWikidata):
+        def search_candidate_groups(self, mentions, limit=3, context=None):
+            resolved = super().resolve_entities(mentions, limit, context)
+            return [
+                WikidataCandidateGroup(mention=mention, candidates=[entity])
+                for mention, entity in zip(mentions, resolved, strict=True)
+            ]
+
+        def find_candidate_paths(self, groups, **kwargs):
+            relationship = self.find_relationships([group.candidates[0] for group in groups])[0]
+            return [
+                WikidataPath(
+                    source_id=relationship.subject_id,
+                    target_id=relationship.object_id,
+                    edges=[relationship],
+                )
+            ]
+
+    llm = DisambiguatingLLM()
+    service = HybridAgentService(
+        llm=llm,
+        wikidata=CandidateWikidata(),
+        prompt_repository=StubPromptRepository(),
+    )
+
+    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
+
+    assert [call["stage"] for call in llm.calls] == [
+        "entity_extraction",
+        "candidate_disambiguation",
+        "rdf_build",
+    ]
+    assert response.entities[0].id == "Q1054564"
+    assert response.ned["candidate_groups"][0]["candidates"][0]["id"] == "Q1054564"
+    assert response.ned["paths"][0]["hops"] == 1
+    assert "candidate_disambiguation" in response.llm
+
+
+def test_agent_rejects_disambiguation_id_outside_candidate_group():
+    class InvalidSelectionLLM(StubLLM):
+        def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
+            if stage == "candidate_disambiguation":
+                return json.dumps({"selections": [{"mention_index": 0, "selected_id": "Q999999"}]})
+            return super().generate(system_prompt, prompt, stage, timeout_seconds)
+
+    class SingleCandidateWikidata(StubWikidata):
+        def search_candidate_groups(self, mentions, limit=3, context=None):
+            entity = WikidataEntity(
+                mention=mentions[0],
+                id="Q1054564",
+                iri="http://www.wikidata.org/entity/Q1054564",
+                label="Mango",
+            )
+            return [WikidataCandidateGroup(mention=mentions[0], candidates=[entity])]
+
+        def find_candidate_paths(self, groups, **kwargs):
+            return []
+
+    class OneMentionLLM(InvalidSelectionLLM):
+        def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
+            if stage == "entity_extraction":
+                return json.dumps({"entities": [{"surface": "Mango", "start": 0, "end": 5}]})
+            return super().generate(system_prompt, prompt, stage, timeout_seconds)
+
+    service = HybridAgentService(
+        llm=OneMentionLLM(),
+        wikidata=SingleCandidateWikidata(),
+        prompt_repository=StubPromptRepository(),
+    )
+
+    with pytest.raises(ValueError, match="invalid Wikidata ID"):
+        service.analyze(AnalyzeRequest(text="Mango."))

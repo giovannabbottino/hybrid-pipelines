@@ -44,18 +44,33 @@ Agent -> EventLog: append llm_entity_response
 Agent -> Agent: strictly parse JSON, realign mentions, supplement patterns, dedupe, apply configured limit
 
 loop each mention
-  Agent -> WD ++: resolve entity mention
+  Agent -> WD ++: retrieve candidate group
   WD -> Wikidata ++: tools/call search_items
   Wikidata --> WD --: candidate entities
-  WD -> Wikidata ++: tools/call get_statements
-  Wikidata --> WD --: statements
-  WD --> Agent --: resolved WikidataEntity
+  loop each candidate
+    WD -> Wikidata ++: tools/call get_statements
+    Wikidata --> WD --: candidate statements
+  end
+  WD --> Agent --: WikidataCandidateGroup
 end
 
+Agent -> EventLog: append wikidata_candidates
+Agent -> WD ++: find paths up to two hops
+WD --> Agent --: filtered candidate paths
+Agent -> EventLog: append wikidata_candidate_paths
+
+Agent -> Repo ++: load candidate disambiguation prompt
+Repo -> PromptFiles: read prompts/candidate-disambiguation.txt
+Repo --> Agent --: disambiguation prompt template
+Agent -> LLM ++: generate(system_prompt, disambiguation_prompt, stage="candidate_disambiguation")
+LLM -> Ollama ++: POST /api/generate {model, system, prompt, stream:false}
+Ollama --> LLM --: selected QIDs as JSON
+LLM --> Agent --: strict selections
+Agent -> Agent: validate every selected QID against its candidate group
 Agent -> EventLog: append wikidata_entities
 
-Agent -> WD ++: find_relationships(resolved entities)
-WD --> Agent --: direct relationships among resolved entities
+Agent -> WD ++: find_relationships(selected entities)
+WD --> Agent --: direct relationships among selected entities
 Agent -> EventLog: append wikidata_relationships
 
 Agent -> Repo ++: load RDF build prompt
@@ -77,7 +92,7 @@ Agent -> Agent: strictly parse Turtle; retry same LLM stage if configured
 Agent -> EventLog: append rdf_built
 
 Agent --> Controller --: AnalyzeResponse
-Controller --> Client --: 200 {text, entities, relationships, rdf, source_attribution, llm}
+Controller --> Client --: 200 {text, entities, relationships, rdf, source_attribution, llm, ned}
 Client --> User: Show result
 
 @enduml
