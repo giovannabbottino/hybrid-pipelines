@@ -105,13 +105,23 @@ class HybridAgentService:
         )
         self._log(key, "rdf_built", {"rdf": rdf})
 
-        return AnalyzeResponse(
+        response = AnalyzeResponse(
             text=request.text,
             entities=entities,
             relationships=relationships,
             rdf=rdf,
             llm={"entity_extraction": extraction_raw},
         )
+        self._log(
+            key,
+            "analyze_completed",
+            {
+                "rdf": rdf,
+                "entity_count": len(entities),
+                "relationship_count": len(relationships),
+            },
+        )
+        return response
 
     def health(self) -> dict[str, Any]:
         return {
@@ -157,7 +167,8 @@ class HybridAgentService:
         attempts = max(1, min(int(max_attempts or 3), 3))
         last_error = None
 
-        prompt = self._build_rdf_prompt(text, entities, relationships)
+        original_prompt = self._build_rdf_prompt(text, entities, relationships)
+        prompt = original_prompt
         for attempt in range(1, attempts + 1):
             rdf = self._build_rdf(prompt, key, deadline)
             try:
@@ -177,16 +188,21 @@ class HybridAgentService:
                 return rdf
             except Exception as exc:  # rdflib raises parser-specific exception classes.
                 last_error = str(exc)
+                self._log(
+                    key,
+                    "rdf_validation_failed",
+                    {"attempt": attempt, "error": last_error},
+                )
 
             if attempt < attempts:
                 prompt = _build_retry_prompt(
-                    prompt,
+                    original_prompt,
                     rdf,
                     last_error or "Invalid Turtle RDF.",
                 )
 
         raise RDFValidationError(
-            "rdf parse errror",
+            "RDF parsing failed.",
             attempts=attempts,
             last_error=last_error,
         )
@@ -647,7 +663,12 @@ def _build_retry_prompt(original_prompt: str, invalid_rdf: str, parser_error: st
         f"{original_prompt}\n\n"
         "The previous answer was not valid Turtle RDF when parsed with rdflib Graph.parse.\n"
         f"Parser error:\n{error}\n\n"
-        "Return only corrected valid Turtle RDF. Do not include markdown fences, comments, or explanations.\n"
+        "Regenerate the complete document so every statement conforms to the standard "
+        "RDF/Turtle grammar and the full response parses without errors with "
+        "rdflib.Graph.parse(format=\"turtle\"). Treat the parser error only as a "
+        "diagnostic: review and correct the entire RDF document, not only the reported "
+        "line. Return only the corrected Turtle RDF without markdown, comments, or "
+        "explanations.\n"
         f"Previous invalid RDF:\n{previous}"
     )
 

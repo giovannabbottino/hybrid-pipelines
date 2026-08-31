@@ -24,8 +24,7 @@ python -m pytest tests/unit/test_prompts.py
 
 GitHub Actions runs `.github/workflows/ci.yml` for every push, pull request, and manual dispatch. The workflow:
 
-- runs Ruff and Pyright on Python 3.13;
-- runs the test suite on Python 3.10 and 3.13;
+- runs Ruff, Pyright, and the test suite on Python 3.12;
 - caches downloaded pip packages;
 - cancels an older run when a newer commit is pushed to the same branch.
 

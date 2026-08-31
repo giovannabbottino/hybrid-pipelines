@@ -8,7 +8,7 @@ resolved entities, statements, and direct relationships before RDF generation.
 
 ## Quick start
 
-Requirements: Python 3.10 or newer, Ollama with `llama3.1:8b`, and outbound
+Requirements: Python 3.12, Ollama with `llama3.1:8b`, and outbound
 HTTPS access to the configured Wikidata MCP endpoint.
 
 ```bash

@@ -27,11 +27,11 @@ Optional Ollama generation options are ignored when blank: `OLLAMA_SEED`, `OLLAM
 
 Entity extraction is always assigned to the LLM, so the normal successful path uses two LLM calls. The configured mention limit is 16, `OLLAMA_NUM_PREDICT=1536` bounds RDF output length, and `OLLAMA_TEMPERATURE=0` reduces sampling variability.
 
-`POST /analyze` uses one RDF attempt by default. Set `max_rdf_attempts` to `2` or `3` only to repeat the same model-based RDF stage after a strict parse error.
+`POST /analyze` uses three RDF attempts by default. Set `max_rdf_attempts` from `1` to `3` to control how many times the same model-based RDF stage runs after strict parse failures.
 
 ## Requirements
 
-- Python >=3.10
+- Python 3.12
 - Ollama with the configured model installed
 - Network access to the configured Wikidata MCP endpoint
 

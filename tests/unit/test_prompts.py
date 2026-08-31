@@ -24,6 +24,8 @@ def test_rdf_prompt_requires_only_turtle_and_expected_prefixes():
 
     assert 'The first character of the response must be "@"' in prompt
     assert "Do not write introductions" in prompt
+    assert "standard RDF/Turtle grammar" in prompt
+    assert "valid Turtle syntax takes precedence" in prompt
     assert "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> ." in prompt
     assert "@prefix wd: <http://www.wikidata.org/entity/> ." in prompt
     assert "@prefix kg: <https://example.org/wikidata-description/> ." in prompt
@@ -51,3 +53,5 @@ def test_system_prompt_forbids_qids_as_labels():
     assert "A Wikidata ID such as Q42 is an identifier" in prompt
     assert 'never emit `rdfs:label "Q42"`' in prompt
     assert "use the canonical Wikidata label" in prompt
+    assert "standard RDF/Turtle grammar" in prompt
+    assert "valid Turtle syntax takes precedence" in prompt

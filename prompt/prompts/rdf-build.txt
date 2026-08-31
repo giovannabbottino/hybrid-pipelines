@@ -4,6 +4,7 @@ Input JSON:
 ${PAYLOAD}
 
 Return valid Turtle only.
+The complete RDF output must conform to the standard RDF/Turtle grammar and parse without errors with `rdflib.Graph.parse(format="turtle")`. Apply the grammar to every statement in the document; the requirements below do not replace or limit the Turtle syntax rules. If any requirement conflicts with valid Turtle syntax, valid Turtle syntax takes precedence.
 
 Hard output rules:
 - The first character of the response must be "@" from the first @prefix line.

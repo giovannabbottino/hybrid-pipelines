@@ -19,6 +19,7 @@ from hybrid_pipelines.domain.models import (
     WikidataEntity,
     WikidataRelationship,
 )
+from hybrid_pipelines.infrastructure.request_logger import RequestLogger
 
 
 class StubLLM:
@@ -84,6 +85,30 @@ class StubPromptRepository:
             "prompts/rdf-build.txt": "Build ${PAYLOAD}",
         }
         return prompts[prompt_name]
+
+
+def test_analyze_logs_request_lifecycle_with_idempotence_key(tmp_path):
+    log_path = tmp_path / "analyze.jsonl"
+    service = HybridAgentService(
+        llm=StubLLM(),
+        wikidata=StubWikidata(),
+        prompt_repository=StubPromptRepository(),
+        request_logger=RequestLogger(log_path),
+    )
+
+    service.analyze(
+        AnalyzeRequest(
+            text="Mango is not a fruit from a tree.",
+            idempotence_key="request-123",
+        )
+    )
+
+    entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert {entry["idempotence_key"] for entry in entries} == {"request-123"}
+    events = [entry["event"] for entry in entries]
+    assert events[0] == "analyze_started"
+    assert "rdf_validated" in events
+    assert events[-1] == "analyze_completed"
 
 
 def test_agent_extracts_entities_resolves_wikidata_and_builds_rdf():
@@ -228,6 +253,9 @@ def test_agent_retries_until_rdf_is_valid():
     assert '"mango"@en' in response.rdf
     assert len(rdf_prompts) == 2
     assert "previous answer was not valid Turtle RDF" in rdf_prompts[1]
+    assert "Previous invalid RDF:\nnot rdf" in rdf_prompts[1]
+    assert "every statement conforms to the standard RDF/Turtle grammar" in rdf_prompts[1]
+    assert "correct the entire RDF document" in rdf_prompts[1]
 
 
 def test_agent_retries_llm_when_rdf_has_only_prefixes():

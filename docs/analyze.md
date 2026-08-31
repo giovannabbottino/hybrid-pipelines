@@ -61,7 +61,7 @@ Wikidata MCP is the only evidence source. An MCP failure fails the request.
 9. Keep direct relationships where an entity statement points to another resolved entity.
 10. Load the RDF build prompt, inject a JSON payload with text, source attribution, compact entities, and relationships.
 11. Ask the LLM to return RDF/Turtle and strip code fences or trailing notes when present.
-12. Strictly validate the RDF with `rdflib.Graph.parse(format="turtle")`. Retry the same model stage with parser feedback only when `max_rdf_attempts` is greater than 1; no local RDF repair or deterministic substitute is attempted.
+12. Strictly validate the RDF with `rdflib.Graph.parse(format="turtle")`. If parsing fails, retry the same model stage with both the parser error and the previous invalid RDF. Return immediately when parsing succeeds; no local RDF repair or deterministic substitute is attempted.
 13. Return the analysis response and write request events/LLM CSV logs when configured.
 
 ### Success response
@@ -111,7 +111,7 @@ Wikidata MCP is the only evidence source. An MCP failure fails the request.
 |--------|-------|----------------|
 | `400` | Missing or blank `text`, or invalid local prompt path | `{ "error": "..." }` |
 | `502` | External service request failed, model request failed, or runtime generation error | `{ "error": "...", "details": "..." }` |
-| `508` | The model did not return valid Turtle RDF after the configured attempts | `{ "error": "rdf parse errror", "attempts": 3, "details": "..." }` |
+| `422` | The model did not return valid Turtle RDF after the configured attempts | `{ "error": "RDF parsing failed.", "attempts": 3, "details": "..." }` |
 | `504` | External service timeout | `{ "error": "External service request timed out.", "details": "...", "hint": "..." }` |
 
 ## Logs
