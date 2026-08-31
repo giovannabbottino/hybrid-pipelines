@@ -129,6 +129,8 @@ entity extraction and one for RDF generation. A client can set
 `max_rdf_attempts` from `1` to `3`; retries repeat only the model-based RDF stage
 after strict parser feedback. The service does not repair invalid Turtle or
 substitute a deterministic graph locally.
+Its system and RDF-build prompts use the same mandatory prefix-binding and
+Turtle-punctuation block as the prompt-based and ontology-based pipelines.
 
 ## Run
 

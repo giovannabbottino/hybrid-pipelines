@@ -95,7 +95,12 @@ Important RDF rules:
 - the first character must be `@`;
 - return valid Turtle only;
 - do not use markdown or code fences;
-- do not use undeclared prefixes;
+- declare every used prefix in the same response before its first use;
+- include the exact `kg:` declaration whenever a `kg:` name is used;
+- never place two objects next to each other without Turtle punctuation;
+- use `,` only for multiple objects of the same predicate;
+- use `;` for a different predicate on the same subject and write that predicate after `;`;
+- terminate each subject statement with `.`;
 - use `rdfs:label` for every `wd:Q...` entity in the graph;
 - use `rdfs:label` for every generated `kg:` entity, concept, class, place, person, organization, event, and object that appears as a subject or object;
 - prefer entity-to-entity triples over literal-only descriptions so SPARQL evaluation can traverse from a subject label to an answer label;
@@ -138,6 +143,7 @@ When editing these prompts:
 - keep `${PAYLOAD}` in the RDF build prompt;
 - keep the required RDF prefixes declared if the prompt or examples use them;
 - avoid introducing undeclared prefixes such as `ex:`;
+- keep the shared mandatory Turtle syntax block identical to the prompt-based and ontology-based pipelines;
 - keep the entity extraction output as strict JSON;
 - keep RDF output instructions concise and strict;
 - keep labels mandatory for all subject/object resources;

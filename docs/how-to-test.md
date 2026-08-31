@@ -3,7 +3,7 @@
 Tests are organized under `tests/unit/`.
 
 - `test_agent_service.py` covers service orchestration, entity extraction parsing, Wikidata resolution calls, relationship handling, RDF build prompting, and response shape.
-- `test_prompts.py` checks important RDF prompt constraints such as required prefixes and no undeclared `ex:` prefix.
+- `test_prompts.py` checks required prefixes and verifies that the RDF-build and system prompts share the canonical prefix-binding and Turtle-punctuation rules.
 
 ## Run all tests
 

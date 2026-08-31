@@ -3,6 +3,10 @@ from pathlib import Path
 from hybrid_pipelines.infrastructure.prompt_repository import PromptRepository
 
 
+def _mandatory_turtle_rules(prompt: str) -> str:
+    return prompt.split("Mandatory Turtle syntax rules:\n", 1)[1].split("\n\n", 1)[0]
+
+
 def test_prompt_repository_loads_project_prompts():
     repository = PromptRepository()
 
@@ -55,3 +59,16 @@ def test_system_prompt_forbids_qids_as_labels():
     assert "use the canonical Wikidata label" in prompt
     assert "standard RDF/Turtle grammar" in prompt
     assert "valid Turtle syntax takes precedence" in prompt
+
+
+def test_rdf_and_system_prompts_share_mandatory_turtle_rules():
+    rdf_prompt = Path("prompt/prompts/rdf-build.txt").read_text(encoding="utf-8")
+    system_prompt = Path("prompt/system/agent.txt").read_text(encoding="utf-8")
+    rules = _mandatory_turtle_rules(rdf_prompt)
+
+    assert rules == _mandatory_turtle_rules(system_prompt)
+    assert "Every prefix used in a triple MUST be declared" in rules
+    assert "include exactly `@prefix kg:" in rules
+    assert "Never write two objects next to each other" in rules
+    assert "Use `,` only to separate multiple objects of the same predicate" in rules
+    assert "Use `;` to continue the same subject with a different predicate" in rules
