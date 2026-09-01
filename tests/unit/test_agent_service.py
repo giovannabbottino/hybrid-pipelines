@@ -9,6 +9,7 @@ from hybrid_pipelines.application.services import (
     RDFValidationError,
     _dedupe_mentions,
     _json_from_text,
+    _json_object_from_text,
     _realign_mentions,
     _strip_code_fence,
     _supplement_mentions,
@@ -203,6 +204,17 @@ def test_entity_json_parser_rejects_malformed_or_non_object_responses():
         _json_from_text(truncated)
     with pytest.raises(ValueError, match="JSON object"):
         _json_from_text(top_level)
+
+
+def test_json_parser_extracts_object_from_markdown_response():
+    wrapped = (
+        'Here is the result:\n```json\n{"selections": '
+        '[{"mention_index": 0, "selected_id": "Q169"}]}\n```\nDone.'
+    )
+
+    assert _json_object_from_text(wrapped) == {
+        "selections": [{"mention_index": 0, "selected_id": "Q169"}]
+    }
 
 
 def test_realign_mentions_uses_successive_exact_occurrences():
@@ -582,7 +594,7 @@ def test_agent_disambiguates_wikidata_candidates_before_building_rdf():
     assert "candidate_disambiguation" in response.llm
 
 
-def test_agent_rejects_disambiguation_id_outside_candidate_group():
+def test_agent_falls_back_when_disambiguation_id_is_outside_candidate_group(tmp_path):
     class InvalidSelectionLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "candidate_disambiguation":
@@ -612,7 +624,14 @@ def test_agent_rejects_disambiguation_id_outside_candidate_group():
         llm=OneMentionLLM(),
         wikidata=SingleCandidateWikidata(),
         prompt_repository=StubPromptRepository(),
+        request_logger=RequestLogger(tmp_path / "analyze.jsonl"),
     )
 
-    with pytest.raises(ValueError, match="invalid Wikidata ID"):
-        service.analyze(AnalyzeRequest(text="Mango."))
+    response = service.analyze(AnalyzeRequest(text="Mango."))
+
+    assert response.entities[0].id == "Q1054564"
+    events = [
+        json.loads(line)["event"]
+        for line in (tmp_path / "analyze.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert "llm_disambiguation_fallback" in events

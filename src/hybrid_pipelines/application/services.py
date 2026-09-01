@@ -203,11 +203,11 @@ class HybridAgentService:
             "candidate_groups": [
                 {
                     "mention_index": index,
-                    **_compact_candidate_group(group),
+                    **_compact_disambiguation_group(group),
                 }
                 for index, group in enumerate(groups)
             ],
-            "graph_context": _summarize_paths(paths),
+            "graph_context": _summarize_paths(paths, character_limit=3000),
         }
         prompt = prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
         self._log(key, "llm_disambiguation_request", {"prompt": prompt})
@@ -218,26 +218,53 @@ class HybridAgentService:
             timeout_seconds=self._remaining_timeout(deadline),
         )
         self._log(key, "llm_disambiguation_response", {"response": raw})
-        result = json.loads(raw)
-        if not isinstance(result, dict) or not isinstance(result.get("selections"), list):
-            raise ValueError("The LLM disambiguation response must contain a selections array.")
+        try:
+            result = _json_object_from_text(raw)
+            if not isinstance(result.get("selections"), list):
+                raise ValueError("The LLM disambiguation response must contain a selections array.")
 
-        selections: dict[int, str] = {}
-        for selection in result["selections"]:
-            if not isinstance(selection, dict):
-                continue
-            mention_index = _optional_int(selection.get("mention_index"))
-            selected_id = selection.get("selected_id")
-            if mention_index is None or not isinstance(selected_id, str):
-                continue
-            if mention_index in selections:
-                raise ValueError(f"The LLM returned duplicate selections for mention {mention_index}.")
-            selections[mention_index] = selected_id
+            selections: dict[int, str] = {}
+            for selection in result["selections"]:
+                if not isinstance(selection, dict):
+                    continue
+                mention_index = _optional_int(selection.get("mention_index"))
+                selected_id = selection.get("selected_id")
+                if mention_index is None or not isinstance(selected_id, str):
+                    continue
+                if mention_index in selections:
+                    raise ValueError(f"The LLM returned duplicate selections for mention {mention_index}.")
+                selections[mention_index] = selected_id
+
+            invalid_indices = {
+                index
+                for index, selected_id in selections.items()
+                if index < 0
+                or index >= len(groups)
+                or not any(candidate.id == selected_id for candidate in groups[index].candidates)
+            }
+            for index in invalid_indices:
+                selections.pop(index, None)
+        except (json.JSONDecodeError, ValueError) as exc:
+            self._log(
+                key,
+                "llm_disambiguation_fallback",
+                {
+                    "error": str(exc),
+                    "strategy": "highest_ranked_wikidata_candidate",
+                },
+            )
+            return _fallback_disambiguated_entities(groups), raw
 
         expected_indices = {index for index, group in enumerate(groups) if group.candidates}
-        if set(selections) != expected_indices:
-            raise ValueError(
-                "The LLM disambiguation response must select every non-empty candidate group exactly once."
+        fallback_indices = sorted(expected_indices - set(selections))
+        if fallback_indices:
+            self._log(
+                key,
+                "llm_disambiguation_fallback",
+                {
+                    "mention_indices": fallback_indices,
+                    "strategy": "highest_ranked_wikidata_candidate",
+                },
             )
 
         entities: list[WikidataEntity] = []
@@ -258,10 +285,17 @@ class HybridAgentService:
                 None,
             )
             if selected is None:
-                allowed = ", ".join(candidate.id or "" for candidate in group.candidates)
-                raise ValueError(
-                    f"The LLM selected an invalid Wikidata ID for mention {index}; allowed IDs: {allowed}."
+                selected = next((candidate for candidate in group.candidates if candidate.id), None)
+            if selected is None:
+                entities.append(
+                    WikidataEntity(
+                        mention=group.mention,
+                        id=None,
+                        iri=None,
+                        label=group.mention.surface,
+                    )
                 )
+                continue
             entities.append(selected)
         return entities, raw
 
@@ -353,7 +387,7 @@ class HybridAgentService:
         payload = {
             "text": text,
             "source_attribution": "Source: Wikidata",
-            "entities": [_compact_entity(entity) for entity in entities],
+            "entities": [_compact_entity(entity, statement_limit=0) for entity in entities],
             "relationships": [relationship.to_dict() for relationship in relationships],
         }
         return prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
@@ -387,13 +421,80 @@ class HybridAgentService:
             self.request_logger.log(idempotence_key=key, event=event, payload=payload)
 
 
-def _json_from_text(text: str) -> dict[str, Any]:
-    payload = json.loads(text)
+def _json_object_from_text(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError as original_error:
+        fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        if fenced:
+            payload = json.loads(fenced.group(1))
+        else:
+            if cleaned.startswith("{"):
+                raise original_error
+            decoder = json.JSONDecoder()
+            for match in re.finditer(r"\{", cleaned):
+                try:
+                    payload, _ = decoder.raw_decode(cleaned[match.start() :])
+                    break
+                except json.JSONDecodeError:
+                    continue
+            else:
+                raise original_error
     if not isinstance(payload, dict):
-        raise ValueError("The LLM entity response must be a JSON object.")
+        raise ValueError("The LLM response must contain a JSON object.")
+    return payload
+
+
+def _json_from_text(text: str) -> dict[str, Any]:
+    payload = _json_object_from_text(text)
     if not isinstance(payload.get("entities"), list):
         raise ValueError("The LLM entity response must contain an entities array.")
     return payload
+
+
+def _compact_disambiguation_group(group: WikidataCandidateGroup) -> dict[str, Any]:
+    return {
+        "mention": {
+            "surface": group.mention.surface,
+            "entity_type": group.mention.entity_type,
+        },
+        "candidates": [
+            {
+                "id": candidate.id,
+                "label": candidate.label,
+                "description": candidate.description,
+                "types": [
+                    {
+                        "relation": statement.get("property_label"),
+                        "label": statement.get("object_label"),
+                        "id": statement.get("object_id"),
+                    }
+                    for statement in candidate.statements[:2]
+                    if statement.get("property_id") in {"P31", "P279"}
+                ],
+            }
+            for candidate in group.candidates
+        ],
+    }
+
+
+def _fallback_disambiguated_entities(groups: list[WikidataCandidateGroup]) -> list[WikidataEntity]:
+    entities: list[WikidataEntity] = []
+    for group in groups:
+        selected = next((candidate for candidate in group.candidates if candidate.id), None)
+        if selected is not None:
+            entities.append(selected)
+            continue
+        entities.append(
+            WikidataEntity(
+                mention=group.mention,
+                id=None,
+                iri=None,
+                label=group.mention.surface,
+            )
+        )
+    return entities
 
 
 def _mention_from_item(item: dict[str, Any]) -> EntityMention:
@@ -547,6 +648,9 @@ def _realign_mentions(text: str, mentions: list[EntityMention]) -> list[EntityMe
 
 def _compact_entity(entity: WikidataEntity, statement_limit: int = 8) -> dict[str, Any]:
     payload = entity.to_dict()
+    if statement_limit <= 0:
+        payload.pop("statements", None)
+        return payload
     statements = payload.get("statements") or []
     priority = {"P31", "P279", "P361", "P527", "P1889", "P1582", "P171", "P105"}
     payload["statements"] = sorted(

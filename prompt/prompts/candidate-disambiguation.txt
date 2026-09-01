@@ -5,18 +5,12 @@ ${PAYLOAD}
 
 Return strict JSON only:
 {
-  "selections": [
-    {
-      "mention_index": 0,
-      "selected_id": "Q...",
-      "confidence": 0.0,
-      "reason": "short evidence-based reason"
-    }
-  ]
+  "selections": []
 }
 
 Rules:
 - Return exactly one selection for every candidate group that has candidates.
+- Each selection must contain only mention_index and selected_id.
 - Copy mention_index exactly from the corresponding candidate group.
 - selected_id must be one of that candidate group's candidates[].id values.
 - Use the original text, candidate label and description, P31/P279 type statements,
@@ -25,4 +19,4 @@ Rules:
 - A missing graph path is neutral evidence, not permission to invent facts.
 - Never invent, alter, normalize, or substitute a Wikidata ID.
 - Do not return a selection for a candidate group whose candidates array is empty.
-- Do not include Markdown, commentary, or keys outside the JSON object.
+- Do not include confidence, reason, Markdown, commentary, or keys outside the JSON object.

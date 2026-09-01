@@ -125,8 +125,10 @@ Optional Ollama generation options are also supported: `OLLAMA_SEED`, `OLLAMA_TE
 Entity extraction always uses the LLM. The current `.env` configures the following generation and mention limits:
 
 ```env
-ENTITY_MENTION_LIMIT=16
+ENTITY_MENTION_LIMIT=10
+OLLAMA_NUM_CTX=8192
 OLLAMA_NUM_PREDICT=1536
+OLLAMA_DISAMBIGUATION_NUM_PREDICT=512
 OLLAMA_TEMPERATURE=0
 ```
 

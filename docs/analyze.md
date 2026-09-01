@@ -53,7 +53,7 @@ Fields:
 3. Ask the LLM to return strict JSON with entity/concept mentions.
 4. Strictly parse the JSON response. Invalid JSON, a non-object response, or no usable mentions fails the request.
 5. Realign model mentions to the text and supplement supported descriptor and numbered-concept patterns.
-6. Deduplicate mentions and keep at most `ENTITY_MENTION_LIMIT` (16 in the current `.env`; the application default is 10).
+6. Deduplicate mentions and keep at most `ENTITY_MENTION_LIMIT` (10 in the current `.env` and application default).
 7. Retrieve a candidate group for every mention through Wikidata MCP `search_items`.
 8. Fetch statements for every candidate through MCP `get_statements` and use P31/P279 evidence to rank ontology-compatible candidates.
 

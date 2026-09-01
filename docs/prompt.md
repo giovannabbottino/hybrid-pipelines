@@ -56,7 +56,7 @@ Expected output:
 
 The service parses this JSON strictly. Invalid JSON, a non-object response, or an empty set of usable mentions fails the request.
 
-Entity extraction always calls the LLM. The service realigns model mentions with nonempty surfaces to the source text and supplements supported descriptor and numbered-concept patterns. Mentions are deduplicated by case-insensitive surface form and offsets, then limited by `ENTITY_MENTION_LIMIT`. The application default is 10, while the current `.env` uses 16.
+Entity extraction always calls the LLM. The service realigns model mentions with nonempty surfaces to the source text and supplements supported descriptor and numbered-concept patterns. Mentions are deduplicated by case-insensitive surface form and offsets, then limited by `ENTITY_MENTION_LIMIT`. Both the application default and the current `.env` use 10.
 
 ## Candidate disambiguation prompt
 

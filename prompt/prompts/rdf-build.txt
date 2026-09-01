@@ -20,6 +20,7 @@ Mandatory Turtle syntax rules:
 - Never write two objects next to each other without Turtle punctuation.
 - Use `,` only to separate multiple objects of the same predicate.
 - Use `;` to continue the same subject with a different predicate, and write that predicate after `;`.
+- Never combine the Turtle keyword `a` with another predicate. Use either `subject a object` or `subject kg:is object`, never `subject kg:is a object`.
 - Use `.` to end each subject statement.
 - Before returning, verify that every used prefix is bound and every predicate-object list is correctly punctuated.
 
