@@ -1,6 +1,6 @@
 from flask import Flask
 
-from hybrid_pipelines.application.services import RDFValidationError
+from hybrid_pipelines.application.services import CandidateDisambiguationError, RDFValidationError
 from hybrid_pipelines.controllers.analyze_controller import create_analyze_blueprint
 from hybrid_pipelines.domain.models import AnalyzeRequest, AnalyzeResponse
 
@@ -17,9 +17,21 @@ class FailingRDFService:
         return {"llm": {"status": "ok"}, "wikidata_mcp": {"status": "ok"}}
 
 
-def _client():
+class FailingDisambiguationService:
+    def analyze(self, request: AnalyzeRequest) -> AnalyzeResponse:
+        raise CandidateDisambiguationError(
+            "Candidate disambiguation failed.",
+            attempts=3,
+            last_error="Missing selections for mention indices: 2",
+        )
+
+    def health(self) -> dict:
+        return {"llm": {"status": "ok"}, "wikidata_mcp": {"status": "ok"}}
+
+
+def _client(service=None):
     app = Flask(__name__)
-    app.register_blueprint(create_analyze_blueprint(FailingRDFService()))
+    app.register_blueprint(create_analyze_blueprint(service or FailingRDFService()))
     return app.test_client()
 
 
@@ -34,6 +46,20 @@ def test_returns_422_after_rdf_attempts_are_exhausted() -> None:
         "error": "RDF parsing failed.",
         "attempts": 3,
         "details": "at line 12 of <>: invalid Turtle",
+    }
+
+
+def test_returns_422_after_disambiguation_attempts_are_exhausted() -> None:
+    response = _client(FailingDisambiguationService()).post(
+        "/analyze",
+        json={"text": "Jaguar is a brand."},
+    )
+
+    assert response.status_code == 422
+    assert response.get_json() == {
+        "error": "Candidate disambiguation failed.",
+        "attempts": 3,
+        "details": "Missing selections for mention indices: 2",
     }
 
 

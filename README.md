@@ -31,7 +31,7 @@ curl -X POST http://127.0.0.1:5050/analyze \
 2. The service strictly parses the extraction response, realigns extracted mentions, supplements supported lexical patterns, and deduplicates them. Invalid JSON or an empty extraction fails the request.
 3. Each mention is expanded to a Wikidata candidate group, limited by `WIKIDATA_CANDIDATE_LIMIT`; no candidate is selected yet.
 4. Wikidata statements are fetched for every candidate, and cross-mention paths of at most two hops are built from the bounded local subgraph. High-degree intermediate nodes are excluded.
-5. The LLM receives the original text, candidate groups, type evidence, and textual path context, then selects exactly one supplied QID per non-empty group.
+5. The LLM receives the original text, candidate groups, type evidence, and textual path context, then selects exactly one supplied QID per non-empty group. Missing or invalid selections are retried through the LLM for the pending groups only; the service never chooses a candidate automatically.
 6. Direct relationships among the selected entities are retained as evidence.
 7. The LLM receives the text, selected entity evidence, and relationships, then returns RDF/Turtle.
 8. The RDF is normalized to remove response wrappers and strictly validated with `rdflib`. Invalid RDF is retried only through the same LLM stage when additional attempts were requested.
@@ -114,6 +114,7 @@ See [docs/prompt.md](docs/prompt.md) for the prompt structure and editing guidel
 | `OLLAMA_MODEL` | `llama3.1:8b` |
 | `OLLAMA_CSV_PATH` | `data/ollama_responses.csv` |
 | `OLLAMA_TIMEOUT_SECONDS` | `300` |
+| `OLLAMA_DISAMBIGUATION_NUM_PREDICT` | `512` |
 | `ENTITY_MENTION_LIMIT` | `10` (lower values reduce sequential Wikidata lookups) |
 | `ANALYZE_TIMEOUT_SECONDS` | `540` |
 | `ANALYZE_LOG_PATH` | `data/analyze_log.jsonl` |
@@ -133,7 +134,9 @@ OLLAMA_TEMPERATURE=0
 ```
 
 With this profile, a successful request normally makes three LLM calls: entity
-extraction, candidate disambiguation, and RDF generation. A client can set
+extraction, candidate disambiguation, and RDF generation. Incomplete candidate
+disambiguation is retried up to three times for pending groups only; there is no
+heuristic candidate fallback. A client can set
 `max_rdf_attempts` from `1` to `3`; retries repeat only the model-based RDF stage
 after strict parser feedback. The service does not repair invalid Turtle or
 substitute a deterministic graph locally.

@@ -58,6 +58,13 @@ class RDFValidationError(RuntimeError):
         self.last_error = last_error
 
 
+class CandidateDisambiguationError(RuntimeError):
+    def __init__(self, message: str, attempts: int, last_error: str | None = None) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.last_error = last_error
+
+
 class HybridAgentService:
     def __init__(
         self,
@@ -198,74 +205,87 @@ class HybridAgentService:
         deadline: float | None = None,
     ) -> tuple[list[WikidataEntity], str]:
         prompt_template = self.prompt_repository.load_prompt(self.disambiguation_prompt_name)
-        payload = {
-            "text": text,
-            "candidate_groups": [
-                {
-                    "mention_index": index,
-                    **_compact_disambiguation_group(group),
-                }
-                for index, group in enumerate(groups)
-            ],
-            "graph_context": _summarize_paths(paths, character_limit=3000),
-        }
-        prompt = prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
-        self._log(key, "llm_disambiguation_request", {"prompt": prompt})
-        raw = self.llm.generate(
-            system_prompt=self.prompt_repository.load_prompt(self.system_prompt_name),
-            prompt=prompt,
-            stage="candidate_disambiguation",
-            timeout_seconds=self._remaining_timeout(deadline),
-        )
-        self._log(key, "llm_disambiguation_response", {"response": raw})
-        try:
-            result = _json_object_from_text(raw)
-            if not isinstance(result.get("selections"), list):
-                raise ValueError("The LLM disambiguation response must contain a selections array.")
-
-            selections: dict[int, str] = {}
-            for selection in result["selections"]:
-                if not isinstance(selection, dict):
-                    continue
-                mention_index = _optional_int(selection.get("mention_index"))
-                selected_id = selection.get("selected_id")
-                if mention_index is None or not isinstance(selected_id, str):
-                    continue
-                if mention_index in selections:
-                    raise ValueError(f"The LLM returned duplicate selections for mention {mention_index}.")
-                selections[mention_index] = selected_id
-
-            invalid_indices = {
-                index
-                for index, selected_id in selections.items()
-                if index < 0
-                or index >= len(groups)
-                or not any(candidate.id == selected_id for candidate in groups[index].candidates)
-            }
-            for index in invalid_indices:
-                selections.pop(index, None)
-        except (json.JSONDecodeError, ValueError) as exc:
-            self._log(
-                key,
-                "llm_disambiguation_fallback",
-                {
-                    "error": str(exc),
-                    "strategy": "highest_ranked_wikidata_candidate",
-                },
-            )
-            return _fallback_disambiguated_entities(groups), raw
-
         expected_indices = {index for index, group in enumerate(groups) if group.candidates}
-        fallback_indices = sorted(expected_indices - set(selections))
-        if fallback_indices:
+        selections: dict[int, str] = {}
+        last_error: str | None = None
+        raw = ""
+        attempts = 3
+        completed_attempts = 0
+
+        for attempt in range(1, attempts + 1):
+            completed_attempts = attempt
+            pending_indices = sorted(expected_indices - set(selections))
+            if not pending_indices:
+                break
+            payload = {
+                "text": text,
+                "candidate_groups": [
+                    {
+                        "mention_index": index,
+                        **_compact_disambiguation_group(groups[index]),
+                    }
+                    for index in pending_indices
+                ],
+                "graph_context": _summarize_paths(paths, character_limit=3000),
+            }
+            prompt = prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
             self._log(
                 key,
-                "llm_disambiguation_fallback",
-                {
-                    "mention_indices": fallback_indices,
-                    "strategy": "highest_ranked_wikidata_candidate",
-                },
+                "llm_disambiguation_request",
+                {"attempt": attempt, "pending_indices": pending_indices, "prompt": prompt},
             )
+            raw = self.llm.generate(
+                system_prompt=self.prompt_repository.load_prompt(self.system_prompt_name),
+                prompt=prompt,
+                stage="candidate_disambiguation",
+                timeout_seconds=self._remaining_timeout(deadline),
+            )
+            self._log(
+                key,
+                "llm_disambiguation_response",
+                {"attempt": attempt, "response": raw},
+            )
+
+            try:
+                attempt_selections = _validated_disambiguation_selections(
+                    raw,
+                    groups,
+                    set(pending_indices),
+                )
+            except (json.JSONDecodeError, ValueError) as exc:
+                last_error = str(exc)
+                self._log(
+                    key,
+                    "llm_disambiguation_validation_failed",
+                    {"attempt": attempt, "error": last_error, "pending_indices": pending_indices},
+                )
+                continue
+
+            selections.update(attempt_selections)
+            remaining = sorted(expected_indices - set(selections))
+            if remaining:
+                last_error = "Missing selections for mention indices: " + ", ".join(map(str, remaining))
+                self._log(
+                    key,
+                    "llm_disambiguation_validation_failed",
+                    {"attempt": attempt, "error": last_error, "pending_indices": remaining},
+                )
+
+        missing_indices = sorted(expected_indices - set(selections))
+        if missing_indices:
+            raise CandidateDisambiguationError(
+                "Candidate disambiguation failed.",
+                attempts=attempts,
+                last_error=last_error or (
+                    "Missing selections for mention indices: " + ", ".join(map(str, missing_indices))
+                ),
+            )
+
+        self._log(
+            key,
+            "llm_disambiguation_validated",
+            {"attempts": completed_attempts, "selection_count": len(selections)},
+        )
 
         entities: list[WikidataEntity] = []
         for index, group in enumerate(groups):
@@ -284,18 +304,12 @@ class HybridAgentService:
                 (candidate for candidate in group.candidates if candidate.id == selected_id),
                 None,
             )
-            if selected is None:
-                selected = next((candidate for candidate in group.candidates if candidate.id), None)
-            if selected is None:
-                entities.append(
-                    WikidataEntity(
-                        mention=group.mention,
-                        id=None,
-                        iri=None,
-                        label=group.mention.surface,
-                    )
+            if selected is None:  # Guarded by strict response validation above.
+                raise CandidateDisambiguationError(
+                    "Candidate disambiguation failed.",
+                    attempts=attempts,
+                    last_error=f"No valid selection for mention index {index}.",
                 )
-                continue
             entities.append(selected)
         return entities, raw
 
@@ -479,22 +493,37 @@ def _compact_disambiguation_group(group: WikidataCandidateGroup) -> dict[str, An
     }
 
 
-def _fallback_disambiguated_entities(groups: list[WikidataCandidateGroup]) -> list[WikidataEntity]:
-    entities: list[WikidataEntity] = []
-    for group in groups:
-        selected = next((candidate for candidate in group.candidates if candidate.id), None)
-        if selected is not None:
-            entities.append(selected)
-            continue
-        entities.append(
-            WikidataEntity(
-                mention=group.mention,
-                id=None,
-                iri=None,
-                label=group.mention.surface,
+def _validated_disambiguation_selections(
+    raw: str,
+    groups: list[WikidataCandidateGroup],
+    pending_indices: set[int],
+) -> dict[int, str]:
+    result = _json_object_from_text(raw)
+    items = result.get("selections")
+    if not isinstance(items, list):
+        raise ValueError("The LLM disambiguation response must contain a selections array.")
+
+    selections: dict[int, str] = {}
+    for selection in items:
+        if not isinstance(selection, dict):
+            raise ValueError("Every disambiguation selection must be a JSON object.")
+        if set(selection) != {"mention_index", "selected_id"}:
+            raise ValueError("Every disambiguation selection must contain only mention_index and selected_id.")
+        mention_index = _optional_int(selection.get("mention_index"))
+        selected_id = selection.get("selected_id")
+        if mention_index is None or not isinstance(selected_id, str):
+            raise ValueError("Every disambiguation selection must contain a valid index and QID string.")
+        if mention_index not in pending_indices:
+            raise ValueError(f"The LLM returned an unexpected selection for mention {mention_index}.")
+        if mention_index in selections:
+            raise ValueError(f"The LLM returned duplicate selections for mention {mention_index}.")
+        if not any(candidate.id == selected_id for candidate in groups[mention_index].candidates):
+            allowed = ", ".join(candidate.id or "" for candidate in groups[mention_index].candidates)
+            raise ValueError(
+                f"The LLM selected an invalid Wikidata ID for mention {mention_index}; allowed IDs: {allowed}."
             )
-        )
-    return entities
+        selections[mention_index] = selected_id
+    return selections
 
 
 def _mention_from_item(item: dict[str, Any]) -> EntityMention:

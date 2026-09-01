@@ -31,6 +31,7 @@ def test_disambiguation_prompt_restricts_selections_to_supplied_candidates():
     assert "selected_id must be one of" in prompt
     assert "Never invent, alter, normalize, or substitute a Wikidata ID" in prompt
     assert "summarized graph_context" in prompt
+    assert "never selects a candidate automatically" in prompt
 
 
 def test_rdf_prompt_requires_only_turtle_and_expected_prefixes():

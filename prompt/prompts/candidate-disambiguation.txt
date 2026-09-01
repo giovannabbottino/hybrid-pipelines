@@ -20,3 +20,4 @@ Rules:
 - Never invent, alter, normalize, or substitute a Wikidata ID.
 - Do not return a selection for a candidate group whose candidates array is empty.
 - Do not include confidence, reason, Markdown, commentary, or keys outside the JSON object.
+- The application never selects a candidate automatically. Missing or invalid selections are retried and ultimately rejected.

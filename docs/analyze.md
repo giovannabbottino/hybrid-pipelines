@@ -59,7 +59,7 @@ Fields:
 
 Wikidata MCP is the only evidence source. An MCP failure fails the request.
 9. Build paths of at most two hops between candidates from different mention groups. Intermediate nodes above the configured local-degree threshold are excluded.
-10. Translate each path to text and ask the LLM to select exactly one supplied QID for every non-empty candidate group. An unknown, missing, or cross-group QID fails the request.
+10. Translate each path to text and ask the LLM to select exactly one supplied QID for every non-empty candidate group. Valid partial selections are accumulated and only pending groups are retried, for at most three attempts. The service never chooses a candidate automatically; an unknown, malformed, duplicate, extra, cross-group, or ultimately missing QID returns HTTP 422.
 11. Keep direct relationships where a selected entity statement points to another selected entity.
 12. Load the RDF build prompt, inject a JSON payload with text, source attribution, compact selected entities, and relationships.
 13. Ask the LLM to return RDF/Turtle and strip code fences or trailing notes when present.
@@ -118,7 +118,7 @@ Wikidata MCP is the only evidence source. An MCP failure fails the request.
 |--------|-------|----------------|
 | `400` | Missing or blank `text`, or invalid local prompt path | `{ "error": "..." }` |
 | `502` | External service request failed, model request failed, or runtime generation error | `{ "error": "...", "details": "..." }` |
-| `422` | The model did not return valid Turtle RDF after the configured attempts | `{ "error": "RDF parsing failed.", "attempts": 3, "details": "..." }` |
+| `422` | The model did not complete strict candidate disambiguation or did not return valid Turtle RDF after the configured attempts | `{ "error": "Candidate disambiguation failed.", "attempts": 3, "details": "..." }` or `{ "error": "RDF parsing failed.", "attempts": 3, "details": "..." }` |
 | `504` | External service timeout | `{ "error": "External service request timed out.", "details": "...", "hint": "..." }` |
 
 ## Logs

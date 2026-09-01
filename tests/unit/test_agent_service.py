@@ -5,6 +5,7 @@ import requests
 from rdflib import Graph, URIRef
 
 from hybrid_pipelines.application.services import (
+    CandidateDisambiguationError,
     HybridAgentService,
     RDFValidationError,
     _dedupe_mentions,
@@ -594,10 +595,11 @@ def test_agent_disambiguates_wikidata_candidates_before_building_rdf():
     assert "candidate_disambiguation" in response.llm
 
 
-def test_agent_falls_back_when_disambiguation_id_is_outside_candidate_group(tmp_path):
+def test_agent_retries_and_rejects_id_outside_candidate_group(tmp_path):
     class InvalidSelectionLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "candidate_disambiguation":
+                self.calls.append({"system_prompt": system_prompt, "prompt": prompt, "stage": stage})
                 return json.dumps({"selections": [{"mention_index": 0, "selected_id": "Q999999"}]})
             return super().generate(system_prompt, prompt, stage, timeout_seconds)
 
@@ -620,18 +622,70 @@ def test_agent_falls_back_when_disambiguation_id_is_outside_candidate_group(tmp_
                 return json.dumps({"entities": [{"surface": "Mango", "start": 0, "end": 5}]})
             return super().generate(system_prompt, prompt, stage, timeout_seconds)
 
+    llm = OneMentionLLM()
     service = HybridAgentService(
-        llm=OneMentionLLM(),
+        llm=llm,
         wikidata=SingleCandidateWikidata(),
         prompt_repository=StubPromptRepository(),
         request_logger=RequestLogger(tmp_path / "analyze.jsonl"),
     )
 
-    response = service.analyze(AnalyzeRequest(text="Mango."))
+    with pytest.raises(CandidateDisambiguationError, match="Candidate disambiguation failed"):
+        service.analyze(AnalyzeRequest(text="Mango."))
 
-    assert response.entities[0].id == "Q1054564"
+    assert len([call for call in llm.calls if call["stage"] == "candidate_disambiguation"]) == 3
     events = [
         json.loads(line)["event"]
         for line in (tmp_path / "analyze.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert "llm_disambiguation_fallback" in events
+    assert events.count("llm_disambiguation_validation_failed") == 3
+    assert "llm_disambiguation_fallback" not in events
+
+
+def test_agent_retries_only_missing_disambiguation_selections():
+    class PartialSelectionLLM(StubLLM):
+        def __init__(self):
+            super().__init__()
+            self.disambiguation_attempt = 0
+
+        def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
+            if stage == "candidate_disambiguation":
+                self.calls.append({"system_prompt": system_prompt, "prompt": prompt, "stage": stage})
+                self.disambiguation_attempt += 1
+                if self.disambiguation_attempt == 1:
+                    return json.dumps({"selections": [{"mention_index": 0, "selected_id": "Q1054564"}]})
+                return json.dumps(
+                    {
+                        "selections": [
+                            {"mention_index": 1, "selected_id": "Q1364"},
+                            {"mention_index": 2, "selected_id": "Q10884"},
+                        ]
+                    }
+                )
+            return super().generate(system_prompt, prompt, stage, timeout_seconds)
+
+    class CandidateWikidata(StubWikidata):
+        def search_candidate_groups(self, mentions, limit=3, context=None):
+            resolved = super().resolve_entities(mentions, limit, context)
+            return [
+                WikidataCandidateGroup(mention=mention, candidates=[entity])
+                for mention, entity in zip(mentions, resolved, strict=True)
+            ]
+
+        def find_candidate_paths(self, groups, **kwargs):
+            return []
+
+    llm = PartialSelectionLLM()
+    service = HybridAgentService(
+        llm=llm,
+        wikidata=CandidateWikidata(),
+        prompt_repository=StubPromptRepository(),
+    )
+
+    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
+
+    calls = [call for call in llm.calls if call["stage"] == "candidate_disambiguation"]
+    assert len(calls) == 2
+    assert '"mention_index": 0' in calls[0]["prompt"]
+    assert '"mention_index": 0' not in calls[1]["prompt"]
+    assert [entity.id for entity in response.entities] == ["Q1054564", "Q1364", "Q10884"]

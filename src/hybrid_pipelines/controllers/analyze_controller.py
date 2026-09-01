@@ -5,7 +5,7 @@ from typing import Any, Protocol
 import requests
 from flask import Blueprint, jsonify, request
 
-from ..application.services import RDFValidationError
+from ..application.services import CandidateDisambiguationError, RDFValidationError
 from ..domain.models import AnalyzeRequest, AnalyzeResponse
 
 
@@ -69,6 +69,17 @@ def create_analyze_blueprint(service: AnalyzeService) -> Blueprint:
                 jsonify(
                     {
                         "error": "RDF parsing failed.",
+                        "attempts": exc.attempts,
+                        "details": exc.last_error,
+                    }
+                ),
+                422,
+            )
+        except CandidateDisambiguationError as exc:
+            return (
+                jsonify(
+                    {
+                        "error": "Candidate disambiguation failed.",
                         "attempts": exc.attempts,
                         "details": exc.last_error,
                     }

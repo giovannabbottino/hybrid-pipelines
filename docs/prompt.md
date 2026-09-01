@@ -62,7 +62,7 @@ Entity extraction always calls the LLM. The service realigns model mentions with
 
 File: `prompt/prompts/candidate-disambiguation.txt`
 
-This prompt receives the original text, indexed candidate groups, compact P31/P279 evidence, and textual paths of at most two hops. It must return exactly one supplied QID for each non-empty group. The service rejects missing selections and IDs outside their corresponding candidate group.
+This prompt receives the original text, indexed candidate groups, compact P31/P279 evidence, and textual paths of at most two hops. It must return exactly one supplied QID for each non-empty group. The service accumulates valid selections and retries only pending groups, up to three attempts. It never selects a candidate automatically; remaining missing, malformed, duplicate, extra, or cross-group selections produce HTTP 422.
 
 Runtime placeholder:
 
@@ -77,9 +77,7 @@ Expected output:
   "selections": [
     {
       "mention_index": 0,
-      "selected_id": "Q312",
-      "confidence": 0.98,
-      "reason": "The company sense matches the surrounding product context."
+      "selected_id": "Q312"
     }
   ]
 }
