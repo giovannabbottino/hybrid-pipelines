@@ -27,10 +27,14 @@ def test_entity_prompt_preserves_distinct_ambiguous_mentions():
 def test_disambiguation_prompt_restricts_selections_to_supplied_candidates():
     prompt = Path("prompt/prompts/candidate-disambiguation.txt").read_text(encoding="utf-8")
 
-    assert "exactly one selection for every candidate group" in prompt
+    assert "This is a JSON selection task. It is not an RDF generation task." in prompt
+    assert "selections array length must equal candidate_groups length" in prompt
+    assert '"required": ["selections"]' in prompt
+    assert '"additionalProperties": false' in prompt
     assert "selected_id must be one of" in prompt
     assert "Never invent, alter, normalize, or substitute a Wikidata ID" in prompt
     assert "summarized graph_context" in prompt
+    assert "Never return the schema itself" in prompt
     assert "never selects a candidate automatically" in prompt
 
 

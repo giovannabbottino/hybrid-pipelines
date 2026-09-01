@@ -13,6 +13,28 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+_CANDIDATE_DISAMBIGUATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "selections": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "mention_index": {"type": "integer", "minimum": 0},
+                    "selected_id": {"type": "string", "pattern": "^Q[1-9][0-9]*$"},
+                },
+                "required": ["mention_index", "selected_id"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["selections"],
+    "additionalProperties": False,
+}
+
+
 def _int_env(name: str) -> int | None:
     value = os.getenv(name)
     if value in (None, ""):
@@ -85,8 +107,10 @@ class OllamaClient:
             "prompt": prompt,
             "stream": False,
         }
-        if stage in {"entity_extraction", "candidate_disambiguation"}:
+        if stage == "entity_extraction":
             payload["format"] = "json"
+        elif stage == "candidate_disambiguation":
+            payload["format"] = _CANDIDATE_DISAMBIGUATION_SCHEMA
         options = dict(self.config.options)
         if stage == "candidate_disambiguation":
             configured_limit = options.get("num_predict")

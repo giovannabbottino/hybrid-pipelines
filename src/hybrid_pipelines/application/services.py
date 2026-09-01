@@ -213,10 +213,10 @@ class HybridAgentService:
         completed_attempts = 0
 
         for attempt in range(1, attempts + 1):
-            completed_attempts = attempt
             pending_indices = sorted(expected_indices - set(selections))
             if not pending_indices:
                 break
+            completed_attempts = attempt
             payload = {
                 "text": text,
                 "candidate_groups": [

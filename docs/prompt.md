@@ -62,7 +62,7 @@ Entity extraction always calls the LLM. The service realigns model mentions with
 
 File: `prompt/prompts/candidate-disambiguation.txt`
 
-This prompt receives the original text, indexed candidate groups, compact P31/P279 evidence, and textual paths of at most two hops. It must return exactly one supplied QID for each non-empty group. The service accumulates valid selections and retries only pending groups, up to three attempts. It never selects a candidate automatically; remaining missing, malformed, duplicate, extra, or cross-group selections produce HTTP 422.
+This prompt receives the original text, indexed candidate groups, compact P31/P279 evidence, and textual paths of at most two hops. It must return exactly one supplied QID for every group. The Ollama request supplies the same strict JSON Schema through its `format` field, preventing RDF, JSON-LD, descriptive fields, and other response shapes at generation time. The service still validates every index and QID, accumulates valid selections, and retries only pending groups for up to three attempts. It never selects a candidate automatically; remaining missing, malformed, duplicate, extra, or cross-group selections produce HTTP 422.
 
 Runtime placeholder:
 

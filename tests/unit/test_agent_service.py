@@ -541,7 +541,7 @@ def test_supplement_mentions_prioritizes_name_and_label_descriptors():
     assert "and" not in surfaces
 
 
-def test_agent_disambiguates_wikidata_candidates_before_building_rdf():
+def test_agent_disambiguates_wikidata_candidates_before_building_rdf(tmp_path):
     class DisambiguatingLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "candidate_disambiguation":
@@ -580,6 +580,7 @@ def test_agent_disambiguates_wikidata_candidates_before_building_rdf():
         llm=llm,
         wikidata=CandidateWikidata(),
         prompt_repository=StubPromptRepository(),
+        request_logger=RequestLogger(tmp_path / "analyze.jsonl"),
     )
 
     response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
@@ -593,6 +594,12 @@ def test_agent_disambiguates_wikidata_candidates_before_building_rdf():
     assert response.ned["candidate_groups"][0]["candidates"][0]["id"] == "Q1054564"
     assert response.ned["paths"][0]["hops"] == 1
     assert "candidate_disambiguation" in response.llm
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "analyze.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    validated = next(event for event in events if event["event"] == "llm_disambiguation_validated")
+    assert validated["payload"]["attempts"] == 1
 
 
 def test_agent_retries_and_rejects_id_outside_candidate_group(tmp_path):
