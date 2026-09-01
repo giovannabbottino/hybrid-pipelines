@@ -29,6 +29,10 @@ def create_app() -> Flask:
     analyze_log_path = os.getenv("ANALYZE_LOG_PATH", "data/analyze_log.jsonl")
     request_logger = RequestLogger(Path(analyze_log_path)) if analyze_log_path else None
     candidate_limit = _int_env("WIKIDATA_CANDIDATE_LIMIT", 3)
+    max_path_hops = _int_env("WIKIDATA_MAX_PATH_HOPS", 2)
+    hub_degree_threshold = _int_env("WIKIDATA_HUB_DEGREE_THRESHOLD", 25)
+    path_expansion_limit = _int_env("WIKIDATA_PATH_EXPANSION_LIMIT", 30)
+    path_limit = _int_env("WIKIDATA_PATH_LIMIT", 24)
     analyze_timeout_seconds = _float_env("ANALYZE_TIMEOUT_SECONDS", 540.0)
     mention_limit = _int_env("ENTITY_MENTION_LIMIT", 10)
 
@@ -38,11 +42,19 @@ def create_app() -> Flask:
         prompt_repository=prompt_repository,
         system_prompt_name=os.getenv("SYSTEM_PROMPT_NAME", "system/agent.txt"),
         entity_prompt_name=os.getenv("ENTITY_EXTRACTION_PROMPT_NAME", "prompts/entity-extraction.txt"),
+        disambiguation_prompt_name=os.getenv(
+            "CANDIDATE_DISAMBIGUATION_PROMPT_NAME",
+            "prompts/candidate-disambiguation.txt",
+        ),
         rdf_prompt_name=os.getenv("RDF_BUILD_PROMPT_NAME", "prompts/rdf-build.txt"),
         request_logger=request_logger,
         candidate_limit=candidate_limit,
         analyze_timeout_seconds=analyze_timeout_seconds,
         mention_limit=mention_limit,
+        max_path_hops=max_path_hops,
+        hub_degree_threshold=hub_degree_threshold,
+        path_expansion_limit=path_expansion_limit,
+        path_limit=path_limit,
     )
     app.register_blueprint(create_analyze_blueprint(service))
     return app

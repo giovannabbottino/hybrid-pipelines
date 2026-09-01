@@ -13,7 +13,9 @@ The application loads `.env` when running locally and also accepts regular envir
 - `OLLAMA_TIMEOUT_SECONDS=300`
 - `OLLAMA_TEMPERATURE=0`
 - `OLLAMA_NUM_PREDICT=1536`
-- `ENTITY_MENTION_LIMIT=16`
+- `OLLAMA_NUM_CTX=8192`
+- `OLLAMA_DISAMBIGUATION_NUM_PREDICT=512`
+- `ENTITY_MENTION_LIMIT=10`
 - `ANALYZE_LOG_PATH=data/analyze_log.jsonl`
 - `WIKIDATA_MCP_URL=https://wd-mcp.wmcloud.org/mcp/`
 - `WIKIDATA_LANGUAGE=en`
@@ -25,13 +27,13 @@ The application loads `.env` when running locally and also accepts regular envir
 
 Optional Ollama generation options are ignored when blank: `OLLAMA_SEED`, `OLLAMA_TEMPERATURE`, `OLLAMA_TOP_K`, `OLLAMA_TOP_P`, `OLLAMA_MIN_P`, `OLLAMA_STOP`, `OLLAMA_NUM_CTX`, and `OLLAMA_NUM_PREDICT`.
 
-Entity extraction is always assigned to the LLM, so the normal successful path uses two LLM calls. The configured mention limit is 16, `OLLAMA_NUM_PREDICT=1536` bounds RDF output length, and `OLLAMA_TEMPERATURE=0` reduces sampling variability.
+Entity extraction is always assigned to the LLM. Candidate disambiguation is also assigned to the LLM when candidate-group search is available. The configured mention limit is 10, `OLLAMA_NUM_CTX=8192` keeps the compact candidate and RDF prompts in context, `OLLAMA_DISAMBIGUATION_NUM_PREDICT=512` bounds the compact candidate-selection response, `OLLAMA_NUM_PREDICT=1536` bounds RDF output length, and `OLLAMA_TEMPERATURE=0` reduces sampling variability.
 
-`POST /analyze` uses one RDF attempt by default. Set `max_rdf_attempts` to `2` or `3` only to repeat the same model-based RDF stage after a strict parse error.
+`POST /analyze` uses three RDF attempts by default. Set `max_rdf_attempts` from `1` to `3` to control how many times the same model-based RDF stage runs after strict parse failures.
 
 ## Requirements
 
-- Python >=3.10
+- Python 3.12
 - Ollama with the configured model installed
 - Network access to the configured Wikidata MCP endpoint
 

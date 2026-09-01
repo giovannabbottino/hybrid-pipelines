@@ -53,6 +53,18 @@ class WikidataEntity:
 
 
 @dataclass(frozen=True)
+class WikidataCandidateGroup:
+    mention: EntityMention
+    candidates: list[WikidataEntity] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mention": self.mention.to_dict(),
+            "candidates": [candidate.to_dict() for candidate in self.candidates],
+        }
+
+
+@dataclass(frozen=True)
 class WikidataRelationship:
     subject_id: str
     subject_label: str
@@ -75,6 +87,32 @@ class WikidataRelationship:
 
 
 @dataclass(frozen=True)
+class WikidataPath:
+    source_id: str
+    target_id: str
+    edges: list[WikidataRelationship] = field(default_factory=list)
+
+    @property
+    def hops(self) -> int:
+        return len(self.edges)
+
+    def to_text(self) -> str:
+        return " ".join(
+            f"{edge.subject_label} {edge.property_label} {edge.object_label}."
+            for edge in self.edges
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "target_id": self.target_id,
+            "hops": self.hops,
+            "edges": [edge.to_dict() for edge in self.edges],
+            "text": self.to_text(),
+        }
+
+
+@dataclass(frozen=True)
 class AnalyzeResponse:
     text: str
     entities: list[WikidataEntity]
@@ -82,6 +120,7 @@ class AnalyzeResponse:
     rdf: str
     source_attribution: str = "Source: Wikidata"
     llm: dict[str, Any] = field(default_factory=dict)
+    ned: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -91,4 +130,5 @@ class AnalyzeResponse:
             "rdf": self.rdf,
             "source_attribution": self.source_attribution,
             "llm": self.llm,
+            "ned": self.ned,
         }

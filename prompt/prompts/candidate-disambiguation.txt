@@ -1,0 +1,45 @@
+Select one Wikidata candidate for every candidate group in the input.
+
+This is a JSON selection task. It is not an RDF generation task.
+Do not describe, reproduce, summarize, or transform the candidates.
+Do not return Turtle, JSON-LD, @context, @graph, labels, descriptions, or candidate statements.
+
+Input JSON:
+${PAYLOAD}
+
+Required JSON Schema:
+{
+  "type": "object",
+  "properties": {
+    "selections": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "properties": {
+          "mention_index": {"type": "integer", "minimum": 0},
+          "selected_id": {"type": "string", "pattern": "^Q[1-9][0-9]*$"}
+        },
+        "required": ["mention_index", "selected_id"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["selections"],
+  "additionalProperties": false
+}
+
+Rules:
+- Count candidate_groups before answering. The selections array length must equal candidate_groups length.
+- Return exactly one selection for every supplied candidate group.
+- Each selection must contain only mention_index and selected_id.
+- Copy mention_index exactly from the corresponding candidate group.
+- selected_id must be one of that candidate group's candidates[].id values.
+- Use the original text, candidate label and description, P31/P279 type statements,
+  and the summarized graph_context text together.
+- Prefer candidates supported by short paths to candidates for other mentions.
+- A missing graph path is neutral evidence, not permission to invent facts.
+- Never invent, alter, normalize, or substitute a Wikidata ID.
+- Do not include confidence, reason, Markdown, commentary, or keys outside the JSON object.
+- Return the final selection object immediately. Never return the schema itself.
+- The application never selects a candidate automatically. Missing or invalid selections are retried and ultimately rejected.

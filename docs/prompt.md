@@ -1,12 +1,13 @@
 # Prompt documentation
 
-The hybrid pipeline uses one system prompt and two task prompts:
+The hybrid pipeline uses one system prompt and three task prompts:
 
 - `prompt/system/agent.txt`
 - `prompt/prompts/entity-extraction.txt`
+- `prompt/prompts/candidate-disambiguation.txt`
 - `prompt/prompts/rdf-build.txt`
 
-The first LLM call extracts entity mentions as JSON. The second LLM call builds RDF/Turtle from the original text plus Wikidata evidence.
+The LLM calls extract entity mentions, disambiguate Wikidata candidate groups, and build RDF/Turtle from the selected entities and Wikidata evidence.
 
 ## System prompt
 
@@ -21,7 +22,7 @@ The system prompt defines the model as a Wikidata-grounded knowledge graph const
 - when building RDF, include `rdfs:label` for every subject and object resource;
 - prefer entity-to-entity triples and a small stable predicate vocabulary so generated graphs can be evaluated with label-based SPARQL.
 
-This prompt is used for both entity extraction and RDF construction.
+This prompt is used for entity extraction, candidate disambiguation, and RDF construction.
 
 ## Entity extraction prompt
 
@@ -46,16 +47,41 @@ Expected output:
       "surface": "exact text span",
       "start": 0,
       "end": 5,
-      "entity_type": "Entity|Class|Object|Concept|Place|Person|Organization",
+      "entity_type": "Entity|Class|Concept|Person|Organization|Place|Event|Disease|Taxon|Work|Product",
       "confidence": 0.0
     }
   ]
 }
 ```
 
-The service parses this JSON and tolerates responses that contain JSON embedded in extra text, although the prompt asks for strict JSON only. Invalid or unparsable extraction output becomes an empty extraction result.
+The service parses this JSON strictly. Invalid JSON, a non-object response, or an empty set of usable mentions fails the request.
 
-Entity extraction always calls the LLM. The service realigns model mentions with nonempty surfaces to the source text and supplements supported descriptor and numbered-concept patterns. When the parsed response contains no nonempty mention surfaces, it recovers mentions from non-stopword tokens before applying the same supplementation. Mentions are deduplicated by case-insensitive surface form and offsets, then limited by `ENTITY_MENTION_LIMIT`. The application default is 10, while the current `.env` uses 16.
+Entity extraction always calls the LLM. The service realigns model mentions with nonempty surfaces to the source text and supplements supported descriptor and numbered-concept patterns. Mentions are deduplicated by case-insensitive surface form and offsets, then limited by `ENTITY_MENTION_LIMIT`. Both the application default and the current `.env` use 10.
+
+## Candidate disambiguation prompt
+
+File: `prompt/prompts/candidate-disambiguation.txt`
+
+This prompt receives the original text, indexed candidate groups, compact P31/P279 evidence, and textual paths of at most two hops. It must return exactly one supplied QID for every group. The Ollama request supplies the same strict JSON Schema through its `format` field, preventing RDF, JSON-LD, descriptive fields, and other response shapes at generation time. The service still validates every index and QID, accumulates valid selections, and retries only pending groups for up to three attempts. It never selects a candidate automatically; remaining missing, malformed, duplicate, extra, or cross-group selections produce HTTP 422.
+
+Runtime placeholder:
+
+```text
+${PAYLOAD}
+```
+
+Expected output:
+
+```json
+{
+  "selections": [
+    {
+      "mention_index": 0,
+      "selected_id": "Q312"
+    }
+  ]
+}
+```
 
 ## RDF build prompt
 
@@ -95,7 +121,12 @@ Important RDF rules:
 - the first character must be `@`;
 - return valid Turtle only;
 - do not use markdown or code fences;
-- do not use undeclared prefixes;
+- declare every used prefix in the same response before its first use;
+- include the exact `kg:` declaration whenever a `kg:` name is used;
+- never place two objects next to each other without Turtle punctuation;
+- use `,` only for multiple objects of the same predicate;
+- use `;` for a different predicate on the same subject and write that predicate after `;`;
+- terminate each subject statement with `.`;
 - use `rdfs:label` for every `wd:Q...` entity in the graph;
 - use `rdfs:label` for every generated `kg:` entity, concept, class, place, person, organization, event, and object that appears as a subject or object;
 - prefer entity-to-entity triples over literal-only descriptions so SPARQL evaluation can traverse from a subject label to an answer label;
@@ -135,9 +166,11 @@ If every attempt fails, the API returns an RDF parse error instead of invalid Tu
 When editing these prompts:
 
 - keep `${TEXT}` in the entity extraction prompt;
+- keep `${PAYLOAD}` in the candidate disambiguation prompt;
 - keep `${PAYLOAD}` in the RDF build prompt;
 - keep the required RDF prefixes declared if the prompt or examples use them;
 - avoid introducing undeclared prefixes such as `ex:`;
+- keep the shared mandatory Turtle syntax block identical to the prompt-based and ontology-based pipelines;
 - keep the entity extraction output as strict JSON;
 - keep RDF output instructions concise and strict;
 - keep labels mandatory for all subject/object resources;

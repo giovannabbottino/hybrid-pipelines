@@ -70,7 +70,7 @@ flowchart TD
     E -- Sim --> F[Garantir rótulos e concluir RDF]
     E -- Não --> G{Ainda há tentativas?]
     G -- Sim --> B
-    G -- Não --> H[Retornar erro HTTP 508]
+    G -- Não --> H[Retornar erro HTTP 422]
 ```
 
 **Saída do bloco:** grafo serializado em RDF/Turtle válido ou erro explícito.

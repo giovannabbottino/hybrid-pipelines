@@ -4,6 +4,7 @@ Input JSON:
 ${PAYLOAD}
 
 Return valid Turtle only.
+The complete RDF output must conform to the standard RDF/Turtle grammar and parse without errors with `rdflib.Graph.parse(format="turtle")`. Apply the grammar to every statement in the document; the requirements below do not replace or limit the Turtle syntax rules. If any requirement conflicts with valid Turtle syntax, valid Turtle syntax takes precedence.
 
 Hard output rules:
 - The first character of the response must be "@" from the first @prefix line.
@@ -11,7 +12,17 @@ Hard output rules:
 - Do not use Markdown or code fences.
 - Do not add notes, explanations, placeholders, ellipses, templates, or examples.
 - Do not output invalid Turtle blocks such as "ex:Document { ... }".
-- Do not use prefixes that are not declared in this prompt.
+
+Mandatory Turtle syntax rules:
+- Follow RDF 1.1 Turtle syntax strictly.
+- Every prefix used in a triple MUST be declared in the same response before its first use.
+- If any `kg:` name is used, include exactly `@prefix kg: <https://example.org/wikidata-description/> .`.
+- Never write two objects next to each other without Turtle punctuation.
+- Use `,` only to separate multiple objects of the same predicate.
+- Use `;` to continue the same subject with a different predicate, and write that predicate after `;`.
+- Never combine the Turtle keyword `a` with another predicate. Use either `subject a object` or `subject kg:is object`, never `subject kg:is a object`.
+- Use `.` to end each subject statement.
+- Before returning, verify that every used prefix is bound and every predicate-object list is correctly punctuated.
 
 Requirements:
 - Use @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .

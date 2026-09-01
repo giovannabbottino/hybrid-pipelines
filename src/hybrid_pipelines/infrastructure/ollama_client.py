@@ -13,6 +13,28 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+_CANDIDATE_DISAMBIGUATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "selections": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "type": "object",
+                "properties": {
+                    "mention_index": {"type": "integer", "minimum": 0},
+                    "selected_id": {"type": "string", "pattern": "^Q[1-9][0-9]*$"},
+                },
+                "required": ["mention_index", "selected_id"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["selections"],
+    "additionalProperties": False,
+}
+
+
 def _int_env(name: str) -> int | None:
     value = os.getenv(name)
     if value in (None, ""):
@@ -39,6 +61,7 @@ class OllamaClientConfig:
     model: str = "llama3.1:8b"
     csv_path: Path = Path("data/ollama_responses.csv")
     timeout_seconds: float = 300.0
+    disambiguation_num_predict: int = 512
     options: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -65,6 +88,7 @@ class OllamaClientConfig:
             model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
             csv_path=Path(os.getenv("OLLAMA_CSV_PATH", "data/ollama_responses.csv")),
             timeout_seconds=_float_env("OLLAMA_TIMEOUT_SECONDS") or 300.0,
+            disambiguation_num_predict=_int_env("OLLAMA_DISAMBIGUATION_NUM_PREDICT") or 512,
             options=options,
         )
 
@@ -83,8 +107,17 @@ class OllamaClient:
             "prompt": prompt,
             "stream": False,
         }
-        if self.config.options:
-            payload["options"] = self.config.options
+        if stage == "entity_extraction":
+            payload["format"] = "json"
+        elif stage == "candidate_disambiguation":
+            payload["format"] = _CANDIDATE_DISAMBIGUATION_SCHEMA
+        options = dict(self.config.options)
+        if stage == "candidate_disambiguation":
+            configured_limit = options.get("num_predict")
+            stage_limit = self.config.disambiguation_num_predict
+            options["num_predict"] = min(configured_limit, stage_limit) if configured_limit else stage_limit
+        if options:
+            payload["options"] = options
 
         timeout = timeout_seconds if timeout_seconds is not None else self.config.timeout_seconds
         response = requests.post(target_url, json=payload, timeout=timeout)

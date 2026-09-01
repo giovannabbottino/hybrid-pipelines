@@ -3,14 +3,22 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import uuid4
 
 import requests
 from rdflib import Graph, Literal, Namespace, URIRef
 from rdflib.namespace import RDF, RDFS
 
-from ..domain.models import AnalyzeRequest, AnalyzeResponse, EntityMention, WikidataEntity, WikidataRelationship
+from ..domain.models import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    EntityMention,
+    WikidataCandidateGroup,
+    WikidataEntity,
+    WikidataPath,
+    WikidataRelationship,
+)
 from ..infrastructure.request_logger import RequestLogger
 
 
@@ -50,6 +58,13 @@ class RDFValidationError(RuntimeError):
         self.last_error = last_error
 
 
+class CandidateDisambiguationError(RuntimeError):
+    def __init__(self, message: str, attempts: int, last_error: str | None = None) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.last_error = last_error
+
+
 class HybridAgentService:
     def __init__(
         self,
@@ -58,22 +73,32 @@ class HybridAgentService:
         prompt_repository: PromptLoader,
         system_prompt_name: str = "system/agent.txt",
         entity_prompt_name: str = "prompts/entity-extraction.txt",
+        disambiguation_prompt_name: str = "prompts/candidate-disambiguation.txt",
         rdf_prompt_name: str = "prompts/rdf-build.txt",
         request_logger: RequestLogger | None = None,
         candidate_limit: int = 3,
         analyze_timeout_seconds: float = 540.0,
         mention_limit: int = 10,
+        max_path_hops: int = 2,
+        hub_degree_threshold: int = 25,
+        path_expansion_limit: int = 30,
+        path_limit: int = 24,
     ) -> None:
         self.llm = llm
         self.wikidata = wikidata
         self.prompt_repository = prompt_repository
         self.system_prompt_name = system_prompt_name
         self.entity_prompt_name = entity_prompt_name
+        self.disambiguation_prompt_name = disambiguation_prompt_name
         self.rdf_prompt_name = rdf_prompt_name
         self.request_logger = request_logger
         self.candidate_limit = max(1, int(candidate_limit))
         self.analyze_timeout_seconds = max(1.0, float(analyze_timeout_seconds))
         self.mention_limit = max(1, int(mention_limit))
+        self.max_path_hops = max(1, min(int(max_path_hops), 2))
+        self.hub_degree_threshold = max(1, int(hub_degree_threshold))
+        self.path_expansion_limit = max(0, int(path_expansion_limit))
+        self.path_limit = max(1, int(path_limit))
 
     def analyze(self, request: AnalyzeRequest) -> AnalyzeResponse:
         key = request.idempotence_key or str(uuid4())
@@ -87,7 +112,41 @@ class HybridAgentService:
 
         mentions, extraction_raw = self._extract_entities(request.text, key, deadline)
         self._ensure_not_timed_out(deadline)
-        entities = self.wikidata.resolve_entities(mentions, limit=self.candidate_limit, context=request.text)
+        candidate_search = getattr(self.wikidata, "search_candidate_groups", None)
+        path_search = getattr(self.wikidata, "find_candidate_paths", None)
+        disambiguation_raw: str | None = None
+        candidate_groups: list[WikidataCandidateGroup] = []
+        paths: list[WikidataPath] = []
+        if callable(candidate_search) and callable(path_search):
+            candidate_groups = cast(Any, candidate_search)(
+                mentions,
+                limit=self.candidate_limit,
+                context=request.text,
+            )
+            self._log(
+                key,
+                "wikidata_candidates",
+                {"candidate_groups": [_compact_candidate_group(group) for group in candidate_groups]},
+            )
+            self._ensure_not_timed_out(deadline)
+            paths = cast(Any, path_search)(
+                candidate_groups,
+                max_hops=self.max_path_hops,
+                hub_degree_threshold=self.hub_degree_threshold,
+                expansion_limit=self.path_expansion_limit,
+                path_limit=self.path_limit,
+            )
+            self._log(key, "wikidata_candidate_paths", {"paths": [path.to_dict() for path in paths]})
+            self._ensure_not_timed_out(deadline)
+            entities, disambiguation_raw = self._disambiguate_candidates(
+                request.text,
+                candidate_groups,
+                paths,
+                key,
+                deadline,
+            )
+        else:
+            entities = self.wikidata.resolve_entities(mentions, limit=self.candidate_limit, context=request.text)
         self._log(key, "wikidata_entities", {"entities": [entity.to_dict() for entity in entities]})
 
         self._ensure_not_timed_out(deadline)
@@ -105,19 +164,154 @@ class HybridAgentService:
         )
         self._log(key, "rdf_built", {"rdf": rdf})
 
-        return AnalyzeResponse(
+        llm_outputs = {"entity_extraction": extraction_raw}
+        if disambiguation_raw is not None:
+            llm_outputs["candidate_disambiguation"] = disambiguation_raw
+        response = AnalyzeResponse(
             text=request.text,
             entities=entities,
             relationships=relationships,
             rdf=rdf,
-            llm={"entity_extraction": extraction_raw},
+            llm=llm_outputs,
+            ned={
+                "candidate_groups": [_compact_candidate_group(group) for group in candidate_groups],
+                "paths": [path.to_dict() for path in paths],
+                "path_summary": _summarize_paths(paths),
+            },
         )
+        self._log(
+            key,
+            "analyze_completed",
+            {
+                "rdf": rdf,
+                "entity_count": len(entities),
+                "relationship_count": len(relationships),
+            },
+        )
+        return response
 
     def health(self) -> dict[str, Any]:
         return {
             "llm": self.llm.health_check(),
             "wikidata_mcp": self.wikidata.health(),
         }
+
+    def _disambiguate_candidates(
+        self,
+        text: str,
+        groups: list[WikidataCandidateGroup],
+        paths: list[WikidataPath],
+        key: str,
+        deadline: float | None = None,
+    ) -> tuple[list[WikidataEntity], str]:
+        prompt_template = self.prompt_repository.load_prompt(self.disambiguation_prompt_name)
+        expected_indices = {index for index, group in enumerate(groups) if group.candidates}
+        selections: dict[int, str] = {}
+        last_error: str | None = None
+        raw = ""
+        attempts = 3
+        completed_attempts = 0
+
+        for attempt in range(1, attempts + 1):
+            pending_indices = sorted(expected_indices - set(selections))
+            if not pending_indices:
+                break
+            completed_attempts = attempt
+            payload = {
+                "text": text,
+                "candidate_groups": [
+                    {
+                        "mention_index": index,
+                        **_compact_disambiguation_group(groups[index]),
+                    }
+                    for index in pending_indices
+                ],
+                "graph_context": _summarize_paths(paths, character_limit=3000),
+            }
+            prompt = prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
+            self._log(
+                key,
+                "llm_disambiguation_request",
+                {"attempt": attempt, "pending_indices": pending_indices, "prompt": prompt},
+            )
+            raw = self.llm.generate(
+                system_prompt=self.prompt_repository.load_prompt(self.system_prompt_name),
+                prompt=prompt,
+                stage="candidate_disambiguation",
+                timeout_seconds=self._remaining_timeout(deadline),
+            )
+            self._log(
+                key,
+                "llm_disambiguation_response",
+                {"attempt": attempt, "response": raw},
+            )
+
+            try:
+                attempt_selections = _validated_disambiguation_selections(
+                    raw,
+                    groups,
+                    set(pending_indices),
+                )
+            except (json.JSONDecodeError, ValueError) as exc:
+                last_error = str(exc)
+                self._log(
+                    key,
+                    "llm_disambiguation_validation_failed",
+                    {"attempt": attempt, "error": last_error, "pending_indices": pending_indices},
+                )
+                continue
+
+            selections.update(attempt_selections)
+            remaining = sorted(expected_indices - set(selections))
+            if remaining:
+                last_error = "Missing selections for mention indices: " + ", ".join(map(str, remaining))
+                self._log(
+                    key,
+                    "llm_disambiguation_validation_failed",
+                    {"attempt": attempt, "error": last_error, "pending_indices": remaining},
+                )
+
+        missing_indices = sorted(expected_indices - set(selections))
+        if missing_indices:
+            raise CandidateDisambiguationError(
+                "Candidate disambiguation failed.",
+                attempts=attempts,
+                last_error=last_error or (
+                    "Missing selections for mention indices: " + ", ".join(map(str, missing_indices))
+                ),
+            )
+
+        self._log(
+            key,
+            "llm_disambiguation_validated",
+            {"attempts": completed_attempts, "selection_count": len(selections)},
+        )
+
+        entities: list[WikidataEntity] = []
+        for index, group in enumerate(groups):
+            if not group.candidates:
+                entities.append(
+                    WikidataEntity(
+                        mention=group.mention,
+                        id=None,
+                        iri=None,
+                        label=group.mention.surface,
+                    )
+                )
+                continue
+            selected_id = selections.get(index)
+            selected = next(
+                (candidate for candidate in group.candidates if candidate.id == selected_id),
+                None,
+            )
+            if selected is None:  # Guarded by strict response validation above.
+                raise CandidateDisambiguationError(
+                    "Candidate disambiguation failed.",
+                    attempts=attempts,
+                    last_error=f"No valid selection for mention index {index}.",
+                )
+            entities.append(selected)
+        return entities, raw
 
     def _extract_entities(self, text: str, key: str, deadline: float | None = None) -> tuple[list[EntityMention], str]:
         system_prompt = self.prompt_repository.load_prompt(self.system_prompt_name)
@@ -157,7 +351,8 @@ class HybridAgentService:
         attempts = max(1, min(int(max_attempts or 3), 3))
         last_error = None
 
-        prompt = self._build_rdf_prompt(text, entities, relationships)
+        original_prompt = self._build_rdf_prompt(text, entities, relationships)
+        prompt = original_prompt
         for attempt in range(1, attempts + 1):
             rdf = self._build_rdf(prompt, key, deadline)
             try:
@@ -177,16 +372,21 @@ class HybridAgentService:
                 return rdf
             except Exception as exc:  # rdflib raises parser-specific exception classes.
                 last_error = str(exc)
+                self._log(
+                    key,
+                    "rdf_validation_failed",
+                    {"attempt": attempt, "error": last_error},
+                )
 
             if attempt < attempts:
                 prompt = _build_retry_prompt(
-                    prompt,
+                    original_prompt,
                     rdf,
                     last_error or "Invalid Turtle RDF.",
                 )
 
         raise RDFValidationError(
-            "rdf parse errror",
+            "RDF parsing failed.",
             attempts=attempts,
             last_error=last_error,
         )
@@ -201,7 +401,7 @@ class HybridAgentService:
         payload = {
             "text": text,
             "source_attribution": "Source: Wikidata",
-            "entities": [_compact_entity(entity) for entity in entities],
+            "entities": [_compact_entity(entity, statement_limit=0) for entity in entities],
             "relationships": [relationship.to_dict() for relationship in relationships],
         }
         return prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
@@ -235,13 +435,95 @@ class HybridAgentService:
             self.request_logger.log(idempotence_key=key, event=event, payload=payload)
 
 
-def _json_from_text(text: str) -> dict[str, Any]:
-    payload = json.loads(text)
+def _json_object_from_text(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError as original_error:
+        fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        if fenced:
+            payload = json.loads(fenced.group(1))
+        else:
+            if cleaned.startswith("{"):
+                raise original_error
+            decoder = json.JSONDecoder()
+            for match in re.finditer(r"\{", cleaned):
+                try:
+                    payload, _ = decoder.raw_decode(cleaned[match.start() :])
+                    break
+                except json.JSONDecodeError:
+                    continue
+            else:
+                raise original_error
     if not isinstance(payload, dict):
-        raise ValueError("The LLM entity response must be a JSON object.")
+        raise ValueError("The LLM response must contain a JSON object.")
+    return payload
+
+
+def _json_from_text(text: str) -> dict[str, Any]:
+    payload = _json_object_from_text(text)
     if not isinstance(payload.get("entities"), list):
         raise ValueError("The LLM entity response must contain an entities array.")
     return payload
+
+
+def _compact_disambiguation_group(group: WikidataCandidateGroup) -> dict[str, Any]:
+    return {
+        "mention": {
+            "surface": group.mention.surface,
+            "entity_type": group.mention.entity_type,
+        },
+        "candidates": [
+            {
+                "id": candidate.id,
+                "label": candidate.label,
+                "description": candidate.description,
+                "types": [
+                    {
+                        "relation": statement.get("property_label"),
+                        "label": statement.get("object_label"),
+                        "id": statement.get("object_id"),
+                    }
+                    for statement in candidate.statements[:2]
+                    if statement.get("property_id") in {"P31", "P279"}
+                ],
+            }
+            for candidate in group.candidates
+        ],
+    }
+
+
+def _validated_disambiguation_selections(
+    raw: str,
+    groups: list[WikidataCandidateGroup],
+    pending_indices: set[int],
+) -> dict[int, str]:
+    result = _json_object_from_text(raw)
+    items = result.get("selections")
+    if not isinstance(items, list):
+        raise ValueError("The LLM disambiguation response must contain a selections array.")
+
+    selections: dict[int, str] = {}
+    for selection in items:
+        if not isinstance(selection, dict):
+            raise ValueError("Every disambiguation selection must be a JSON object.")
+        if set(selection) != {"mention_index", "selected_id"}:
+            raise ValueError("Every disambiguation selection must contain only mention_index and selected_id.")
+        mention_index = _optional_int(selection.get("mention_index"))
+        selected_id = selection.get("selected_id")
+        if mention_index is None or not isinstance(selected_id, str):
+            raise ValueError("Every disambiguation selection must contain a valid index and QID string.")
+        if mention_index not in pending_indices:
+            raise ValueError(f"The LLM returned an unexpected selection for mention {mention_index}.")
+        if mention_index in selections:
+            raise ValueError(f"The LLM returned duplicate selections for mention {mention_index}.")
+        if not any(candidate.id == selected_id for candidate in groups[mention_index].candidates):
+            allowed = ", ".join(candidate.id or "" for candidate in groups[mention_index].candidates)
+            raise ValueError(
+                f"The LLM selected an invalid Wikidata ID for mention {mention_index}; allowed IDs: {allowed}."
+            )
+        selections[mention_index] = selected_id
+    return selections
 
 
 def _mention_from_item(item: dict[str, Any]) -> EntityMention:
@@ -395,6 +677,9 @@ def _realign_mentions(text: str, mentions: list[EntityMention]) -> list[EntityMe
 
 def _compact_entity(entity: WikidataEntity, statement_limit: int = 8) -> dict[str, Any]:
     payload = entity.to_dict()
+    if statement_limit <= 0:
+        payload.pop("statements", None)
+        return payload
     statements = payload.get("statements") or []
     priority = {"P31", "P279", "P361", "P527", "P1889", "P1582", "P171", "P105"}
     payload["statements"] = sorted(
@@ -402,6 +687,44 @@ def _compact_entity(entity: WikidataEntity, statement_limit: int = 8) -> dict[st
         key=lambda item: 0 if item.get("property_id") in priority else 1,
     )[:statement_limit]
     return payload
+
+
+def _compact_candidate_group(group: WikidataCandidateGroup) -> dict[str, Any]:
+    return {
+        "mention": group.mention.to_dict(),
+        "candidates": [
+            {
+                "id": candidate.id,
+                "label": candidate.label,
+                "description": candidate.description,
+                "score": candidate.score,
+                "type_statements": [
+                    statement
+                    for statement in candidate.statements
+                    if str(statement.get("property_id") or statement.get("property") or "")
+                    in {"P31", "P279"}
+                ][:4],
+            }
+            for candidate in group.candidates
+        ],
+    }
+
+
+def _summarize_paths(paths: list[WikidataPath], character_limit: int = 6000) -> str:
+    sentences: list[str] = []
+    seen: set[str] = set()
+    used = 0
+    for path in sorted(paths, key=lambda item: item.hops):
+        text = path.to_text().strip()
+        if not text or text.casefold() in seen:
+            continue
+        addition = len(text) + (1 if sentences else 0)
+        if used + addition > max(1, int(character_limit)):
+            break
+        seen.add(text.casefold())
+        sentences.append(text)
+        used += addition
+    return " ".join(sentences)
 
 
 def _strip_code_fence(text: str) -> str:
@@ -647,7 +970,12 @@ def _build_retry_prompt(original_prompt: str, invalid_rdf: str, parser_error: st
         f"{original_prompt}\n\n"
         "The previous answer was not valid Turtle RDF when parsed with rdflib Graph.parse.\n"
         f"Parser error:\n{error}\n\n"
-        "Return only corrected valid Turtle RDF. Do not include markdown fences, comments, or explanations.\n"
+        "Regenerate the complete document so every statement conforms to the standard "
+        "RDF/Turtle grammar and the full response parses without errors with "
+        "rdflib.Graph.parse(format=\"turtle\"). Treat the parser error only as a "
+        "diagnostic: review and correct the entire RDF document, not only the reported "
+        "line. Return only the corrected Turtle RDF without markdown, comments, or "
+        "explanations.\n"
         f"Previous invalid RDF:\n{previous}"
     )
 

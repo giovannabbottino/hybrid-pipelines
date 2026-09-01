@@ -1,1 +1,1 @@
-# Makes src a package.
+"""Hybrid knowledge graph construction service."""

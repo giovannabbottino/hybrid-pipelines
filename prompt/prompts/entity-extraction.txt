@@ -7,7 +7,7 @@ Return strict JSON only:
       "surface": "exact text span",
       "start": 0,
       "end": 5,
-      "entity_type": "Entity|Class|Object|Concept|Place|Person|Organization",
+      "entity_type": "Entity|Class|Concept|Person|Organization|Place|Event|Disease|Taxon|Work|Product",
       "confidence": 0.0
     }
   ]
@@ -17,6 +17,8 @@ Rules:
 - Prioritize every main entity described in the passage, then its explicit class,
   nationality, location, organization, product, and other directly related concepts.
 - Include named entities and common-noun concepts that participate in the meaning.
+- Use the most specific supported Wikidata-grounded category. Use Entity, Class,
+  or Concept only when none of the specific categories applies.
 - When the same surface form denotes different entities in different parts of the
   passage, include each occurrence with its own character offsets. They are not duplicates.
 - Use character offsets where possible.
