@@ -29,10 +29,7 @@ def test_mcp_parses_event_prefixed_sse_response(monkeypatch):
     client = WikidataMCPClient(WikidataMCPConfig())
     response = requests.Response()
     response.status_code = 200
-    response._content = (
-        b'event: message\n'
-        b'data: {"jsonrpc":"2.0","id":1,"result":{"items":[]}}\n\n'
-    )
+    response._content = b'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"items":[]}}\n\n'
     monkeypatch.setattr(client, "_request_with_retries", lambda *args, **kwargs: response)
 
     data, _ = client._post_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call"})
@@ -42,13 +39,9 @@ def test_mcp_parses_event_prefixed_sse_response(monkeypatch):
 
 def test_mcp_text_results_are_parsed_into_entities_and_statements():
     items = _coerce_items("Q169: mango — fruit of the mango tree")
-    statements = _coerce_statements(
-        "mango (Q169): subclass of (P279): fruit (Q3314483)"
-    )
+    statements = _coerce_statements("mango (Q169): subclass of (P279): fruit (Q3314483)")
 
-    assert items == [
-        {"id": "Q169", "label": "mango", "description": "fruit of the mango tree"}
-    ]
+    assert items == [{"id": "Q169", "label": "mango", "description": "fruit of the mango tree"}]
     assert statements == [
         {
             "subject_label": "mango",
@@ -63,9 +56,7 @@ def test_mcp_text_results_are_parsed_into_entities_and_statements():
 
 def test_resolve_entities_caches_statements_by_qid_and_skips_supplements():
     client = WikidataMCPClient(WikidataMCPConfig())
-    client.search_items = lambda query, limit=5: [
-        {"id": "Q1", "label": query, "description": "test"}
-    ]
+    client.search_items = lambda query, limit=5: [{"id": "Q1", "label": query, "description": "test"}]
     calls = []
 
     def get_statements(entity_id):
@@ -152,7 +143,5 @@ def test_candidate_paths_find_two_hop_context_and_filter_local_hub():
 
     assert len(paths) == 1
     assert paths[0].hops == 2
-    assert paths[0].to_text() == (
-        "Alpha instance of shared class. Beta instance of shared class."
-    )
+    assert paths[0].to_text() == ("Alpha instance of shared class. Beta instance of shared class.")
     assert filtered == []

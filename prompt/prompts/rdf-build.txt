@@ -1,60 +1,30 @@
-Build RDF/Turtle for the input text using the extracted entities and Wikidata evidence.
+Build structured RDF triples for the input text using the extracted entities and Wikidata evidence.
 
 Input JSON:
 ${PAYLOAD}
 
-Return valid Turtle only.
-The complete RDF output must conform to the standard RDF/Turtle grammar and parse without errors with `rdflib.Graph.parse(format="turtle")`. Apply the grammar to every statement in the document; the requirements below do not replace or limit the Turtle syntax rules. If any requirement conflicts with valid Turtle syntax, valid Turtle syntax takes precedence.
+Return exactly one JSON object with a non-empty `triples` array. Each item must contain:
+- `subject`: `wd:Q...`, `kg:snake_case_name`, or another supported prefixed identifier
+- `predicate`: `rdf:type`, `rdfs:label`, or a concise `kg:snake_case_name`
+- `object`: a resource identifier or literal value
+- `object_type`: exactly `resource` or `literal`
+- optional `language` for literals, normally `en`
+- optional `datatype` for typed literals, such as `xsd:date`
 
-Hard output rules:
-- The first character of the response must be "@" from the first @prefix line.
-- Do not write introductions such as "Here is the Turtle representation".
-- Do not use Markdown or code fences.
-- Do not add notes, explanations, placeholders, ellipses, templates, or examples.
-- Do not output invalid Turtle blocks such as "ex:Document { ... }".
-
-Mandatory Turtle syntax rules:
-- Follow RDF 1.1 Turtle syntax strictly.
-- Every prefix used in a triple MUST be declared in the same response before its first use.
-- If any `kg:` name is used, include exactly `@prefix kg: <https://example.org/wikidata-description/> .`.
-- Never write two objects next to each other without Turtle punctuation.
-- Use `,` only to separate multiple objects of the same predicate.
-- Use `;` to continue the same subject with a different predicate, and write that predicate after `;`.
-- Never combine the Turtle keyword `a` with another predicate. Use either `subject a object` or `subject kg:is object`, never `subject kg:is a object`.
-- Use `.` to end each subject statement.
-- Before returning, verify that every used prefix is bound and every predicate-object list is correctly punctuated.
-
-Requirements:
-- Use @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
-- Use @prefix wd: <http://www.wikidata.org/entity/> .
-- Use @prefix kg: <https://example.org/wikidata-description/> .
-- Preserve resolved Wikidata IDs in the RDF. For every item in `entities` whose `id` is `Q...`, the corresponding RDF resource MUST be `wd:Q...` using that exact `id`.
-- A resolved entity MUST NOT be replaced with a generated `kg:` resource, a blank node, or a label-only literal. Its QID must appear directly in at least one relationship triple as a subject or object.
-- For every provided relationship, use `subject_id` and `object_id` as `wd:Q...` resources when they are valid QIDs. Keep the IDs even when the labels differ from the text.
-- Materialize every provided relationship exactly once as a directed RDF triple. Do not leave a relationship only in labels or explanatory text.
-- Choose the predicate from the provided `property_label`: use `kg:is` for `instance of` and `subclass of`, `kg:part_of` for `part of`, `kg:has_part` for `has part`, and a concise snake_case `kg:` predicate for other relationship names.
-- Do not create unrelated triples from candidate statements. Every relationship triple must be supported by the input text or by the provided `relationships` list.
-- The required resolved-entity shape is: `wd:<id> rdfs:label "<mention.surface>"@en .` The angle-bracket names describe input fields; output the actual QID and text, not placeholders.
-- Create triples directly from the main resolved entity to entities identified in the description/text.
-- Cover the complete input passage, including each distinct sense or entity described, without merging resources that have different QIDs.
-- Use rdfs:label for every wd:Q... entity that appears in the graph.
-- Use rdfs:label for every kg: generated entity, concept, class, place, person, organization, event, and object that appears as a subject or object.
-- Labels are mandatory graph data, not optional documentation: emit the rdfs:label triple in the same Turtle response as the relationship triples.
-- For resolved entities, use `mention.surface` as the rdfs:label because it is the human-readable wording from the input text. Every provided resolved entity has a nonempty mention surface.
-- A QID is only the resource identifier and MUST NOT be used as label text. Never emit labels such as `"Q42"`, `"wd:Q42"`, or any value copied or derived from an entity `id`.
-- Every `rdfs:label` value must be a human-readable entity name taken from `mention.surface`, the entity `label`, `subject_label`, or `object_label`, in that priority when the fields apply.
-- If no human-readable name is available for a resource, do not invent a label and do not substitute its QID as the label.
-- Do not replace the text wording with a canonical, translated, normalized, or disambiguated Wikidata name. The dataset and this pipeline may resolve different QIDs, so downstream queries identify path endpoints by the human-readable text label rather than ID.
-- Prefer entity-to-entity triples over literal-only descriptions so downstream SPARQL can traverse from a subject label to an answer label.
-- Use kg:is for "entity is description entity" relationships.
-- Use kg:is for type, class, category, or "instance of" relationships unless a more specific provided Wikidata relationship is directly supported.
-- Prefer this predicate vocabulary when it fits the text: kg:is, kg:of, kg:from, kg:in, kg:on, kg:to, kg:with, kg:has_part, kg:part_of, kg:located_in, kg:instance_of.
-- Use kg:of, kg:from, kg:in, kg:on, kg:to, or kg:with when the input text contains those relationship words between resolved entities.
-- If the sentence expresses negation, add kg:negated true on the main entity.
-- Do not invent, alter, normalize, or omit Wikidata QIDs. Only use the exact QIDs from the provided `entities[].id`, `relationships[].subject_id`, and `relationships[].object_id` fields.
-- Do not include raw Wikidata statement dumps unless they directly connect the resolved entities.
-
-The response must start exactly like this:
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix wd: <http://www.wikidata.org/entity/> .
-@prefix kg: <https://example.org/wikidata-description/> .
+Rules:
+- Return JSON only. Do not return Turtle, prefixes, Markdown, comments, or explanations.
+- Preserve every `entities[].id` QID as the corresponding `wd:Q...` resource.
+- Never invent, change, normalize, or omit a provided QID.
+- Use each resolved resource in at least one semantic relationship triple.
+- Materialize every provided relationship exactly once with its subject and object QIDs.
+- Map `instance of` and `subclass of` to `kg:is`, `part of` to `kg:part_of`, and `has part`
+  to `kg:has_part`.
+- Convert every other property label to a concise snake_case `kg:` predicate.
+- Add an `rdfs:label` literal with language `en` for every resource. Prefer `mention.surface`, then
+  the entity or relationship label. Never use a QID as label text.
+- Create additional relationships needed to cover the complete input passage, but do not add facts
+  unrelated to the text or supplied relationships.
+- Keep distinct QIDs as distinct resources.
+- Set `object_type` to `resource` for identifiers and `literal` for literal values.
+- A literal may contain `language` or `datatype`, but not both.
+- Every triple must have a non-empty subject, predicate, object, and object_type.

@@ -42,7 +42,18 @@ class StubLLM:
                     ]
                 }
             )
-        return "@prefix ex: <http://example.org/hybrid/> .\nex:doc ex:mentions ex:mango ."
+        return json.dumps(
+            {
+                "triples": [
+                    {
+                        "subject": "kg:doc",
+                        "predicate": "kg:mentions",
+                        "object": "kg:mango",
+                        "object_type": "resource",
+                    }
+                ]
+            }
+        )
 
     def health_check(self):
         return {"status": "ok"}
@@ -208,14 +219,9 @@ def test_entity_json_parser_rejects_malformed_or_non_object_responses():
 
 
 def test_json_parser_extracts_object_from_markdown_response():
-    wrapped = (
-        'Here is the result:\n```json\n{"selections": '
-        '[{"mention_index": 0, "selected_id": "Q169"}]}\n```\nDone.'
-    )
+    wrapped = 'Here is the result:\n```json\n{"selections": [{"mention_index": 0, "selected_id": "Q169"}]}\n```\nDone.'
 
-    assert _json_object_from_text(wrapped) == {
-        "selections": [{"mention_index": 0, "selected_id": "Q169"}]
-    }
+    assert _json_object_from_text(wrapped) == {"selections": [{"mention_index": 0, "selected_id": "Q169"}]}
 
 
 def test_realign_mentions_uses_successive_exact_occurrences():
@@ -259,19 +265,15 @@ def test_agent_retries_until_rdf_is_valid():
         prompt_repository=StubPromptRepository(),
     )
 
-    response = service.analyze(
-        AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3)
-    )
+    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3))
 
     rdf_prompts = [call["prompt"] for call in llm.calls if call["stage"] == "rdf_build"]
     assert "ex:mentions" in response.rdf
     assert '"doc"@en' in response.rdf
     assert '"mango"@en' in response.rdf
     assert len(rdf_prompts) == 2
-    assert "previous answer was not valid Turtle RDF" in rdf_prompts[1]
-    assert "Previous invalid RDF:\nnot rdf" in rdf_prompts[1]
-    assert "every statement conforms to the standard RDF/Turtle grammar" in rdf_prompts[1]
-    assert "correct the entire RDF document" in rdf_prompts[1]
+    assert "previous structured RDF JSON" in rdf_prompts[1]
+    assert "Previous invalid response:\nnot rdf" in rdf_prompts[1]
 
 
 def test_agent_retries_llm_when_rdf_has_only_prefixes():
@@ -301,9 +303,7 @@ def test_agent_retries_llm_when_rdf_has_only_prefixes():
     llm = PrefixOnlyRetryLLM()
     service = HybridAgentService(llm=llm, wikidata=StubWikidata(), prompt_repository=StubPromptRepository())
 
-    response = service.analyze(
-        AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3)
-    )
+    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3))
 
     rdf_prompts = [call["prompt"] for call in llm.calls if call["stage"] == "rdf_build"]
     assert 'rdfs:label "Mango"' in response.rdf
@@ -330,9 +330,7 @@ def test_agent_rejects_doubled_literal_quotes_without_local_repair():
     )
 
     with pytest.raises(RDFValidationError):
-        service.analyze(
-            AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3)
-        )
+        service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3))
 
 
 def test_agent_adds_missing_labels_for_every_entity_resource():
@@ -378,8 +376,8 @@ def test_agent_materializes_wikidata_relationship_and_removes_qid_labels():
     response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
 
     assert '"Q1054564"' not in response.rdf
-    assert 'wd:Q1054564' in response.rdf
-    assert 'kg:is wd:Q1364' in response.rdf
+    assert "wd:Q1054564" in response.rdf
+    assert "kg:is wd:Q1364" in response.rdf
     assert '"Mango"@en' in response.rdf
     assert '"fruit"@en' in response.rdf
 
@@ -433,7 +431,7 @@ def test_agent_prefers_human_readable_mention_from_text_over_wikidata_label():
                     "@prefix wd: <http://www.wikidata.org/entity/> .\n"
                     "@prefix kg: <https://example.org/wikidata-description/> .\n"
                     "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
-                    "wd:Q1054564 rdfs:label \"Mangifera indica fruit\"@en ; "
+                    'wd:Q1054564 rdfs:label "Mangifera indica fruit"@en ; '
                     "kg:is wd:Q1364 ."
                 )
             return super().generate(system_prompt, prompt, stage, timeout_seconds)
@@ -490,11 +488,9 @@ Please note this is a template.
     assert "Here is" not in cleaned
     assert "Please note" not in cleaned
 
+
 def test_supplement_mentions_adds_explicit_descriptor_concepts():
-    text = (
-        "A sports car used Type 24. The technology company used a trade name. "
-        "Apple Records is a record label."
-    )
+    text = "A sports car used Type 24. The technology company used a trade name. Apple Records is a record label."
 
     mentions = _supplement_mentions(text, [], limit=16)
     surfaces = {mention.surface.casefold() for mention in mentions}
@@ -506,11 +502,13 @@ def test_agent_rejects_invalid_llm_turtle_without_deterministic_fallback():
     class InvalidRDFLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "rdf_build":
-                self.calls.append({
-                    "system_prompt": system_prompt,
-                    "prompt": prompt,
-                    "stage": stage,
-                })
+                self.calls.append(
+                    {
+                        "system_prompt": system_prompt,
+                        "prompt": prompt,
+                        "stage": stage,
+                    }
+                )
                 return "this is not Turtle"
             return super().generate(system_prompt, prompt, stage, timeout_seconds)
 
@@ -522,17 +520,13 @@ def test_agent_rejects_invalid_llm_turtle_without_deterministic_fallback():
     )
 
     with pytest.raises(RDFValidationError):
-        service.analyze(
-            AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3)
-        )
+        service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3))
 
     assert len([call for call in llm.calls if call["stage"] == "rdf_build"]) == 3
 
+
 def test_supplement_mentions_prioritizes_name_and_label_descriptors():
-    text = (
-        "A technology company offers online services. "
-        "It uses a trade name and operates a record label."
-    )
+    text = "A technology company offers online services. It uses a trade name and operates a record label."
 
     mentions = _supplement_mentions(text, [], limit=4)
     surfaces = [mention.surface.casefold() for mention in mentions]
@@ -594,10 +588,7 @@ def test_agent_disambiguates_wikidata_candidates_before_building_rdf(tmp_path):
     assert response.ned["candidate_groups"][0]["candidates"][0]["id"] == "Q1054564"
     assert response.ned["paths"][0]["hops"] == 1
     assert "candidate_disambiguation" in response.llm
-    events = [
-        json.loads(line)
-        for line in (tmp_path / "analyze.jsonl").read_text(encoding="utf-8").splitlines()
-    ]
+    events = [json.loads(line) for line in (tmp_path / "analyze.jsonl").read_text(encoding="utf-8").splitlines()]
     validated = next(event for event in events if event["event"] == "llm_disambiguation_validated")
     assert validated["payload"]["attempts"] == 1
 
@@ -642,8 +633,7 @@ def test_agent_retries_and_rejects_id_outside_candidate_group(tmp_path):
 
     assert len([call for call in llm.calls if call["stage"] == "candidate_disambiguation"]) == 3
     events = [
-        json.loads(line)["event"]
-        for line in (tmp_path / "analyze.jsonl").read_text(encoding="utf-8").splitlines()
+        json.loads(line)["event"] for line in (tmp_path / "analyze.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert events.count("llm_disambiguation_validation_failed") == 3
     assert "llm_disambiguation_fallback" not in events

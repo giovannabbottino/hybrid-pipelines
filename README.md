@@ -1,6 +1,6 @@
 # Hybrid Pipelines Wikidata Agent
 
-Flask API that builds a knowledge graph by combining LLM prompts with Wikidata evidence. The service extracts entity mentions from input text, resolves them exclusively through Wikidata MCP, finds direct relationships among resolved entities, and asks the LLM to generate RDF/Turtle. Dependency or validation failures are returned explicitly; the pipeline has no alternate data source or local recovery path.
+Flask API that builds a knowledge graph by combining LLM prompts with Wikidata evidence. The service extracts entity mentions, resolves them through Wikidata MCP, finds direct relationships, asks the LLM for structured RDF triples, and serializes the final Turtle string with RDFLib. Dependency or validation failures are returned explicitly.
 
 This is the most explicitly grounded variant in the evaluation workspace. In
 contrast with the prompt-only and ontology-focused services, it materializes
@@ -33,8 +33,8 @@ curl -X POST http://127.0.0.1:5050/analyze \
 4. Wikidata statements are fetched for every candidate, and cross-mention paths of at most two hops are built from the bounded local subgraph. High-degree intermediate nodes are excluded.
 5. The LLM receives the original text, candidate groups, type evidence, and textual path context, then selects exactly one supplied QID per non-empty group. Missing or invalid selections are retried through the LLM for the pending groups only; the service never chooses a candidate automatically.
 6. Direct relationships among the selected entities are retained as evidence.
-7. The LLM receives the text, selected entity evidence, and relationships, then returns RDF/Turtle.
-8. The RDF is normalized to remove response wrappers and strictly validated with `rdflib`. Invalid RDF is retried only through the same LLM stage when additional attempts were requested.
+7. The LLM receives the text, selected entity evidence, and relationships, then returns structured triples under a strict JSON schema.
+8. The application validates identifiers and literal metadata, builds an RDFLib graph, and returns its validated Turtle serialization.
 
 ## Project Layout
 
@@ -137,11 +137,10 @@ With this profile, a successful request normally makes three LLM calls: entity
 extraction, candidate disambiguation, and RDF generation. Incomplete candidate
 disambiguation is retried up to three times for pending groups only; there is no
 heuristic candidate fallback. A client can set
-`max_rdf_attempts` from `1` to `3`; retries repeat only the model-based RDF stage
-after strict parser feedback. The service does not repair invalid Turtle or
-substitute a deterministic graph locally.
-Its system and RDF-build prompts use the same mandatory prefix-binding and
-Turtle-punctuation block as the prompt-based and ontology-based pipelines.
+`max_rdf_attempts` from `1` to `3`; retries repeat only the structured-triple generation stage
+after validation feedback. The shared serializer normalizes `kg:` local names and guarantees
+Turtle syntax. Its system and RDF-build prompts use the same triple fields and identifier rules as
+the prompt-based and ontology-based pipelines.
 
 ## Run
 
@@ -161,3 +160,9 @@ python -m pytest
 python -m ruff check .
 python -m pyright
 ```
+
+## Pipeline documentation
+
+![Pipeline process](docs/figures/process.png)
+
+See [sequence diagram and regeneration instructions](docs/diagrams.md) and [structured RDF contract](docs/structured-rdf.md).

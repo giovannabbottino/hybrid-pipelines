@@ -49,9 +49,16 @@ extração heurística substituta quando a resposta do modelo é inválida ou va
 ```mermaid
 flowchart TD
     A[Pesquisar cada menção] --> B[Chamar search_items no Wikidata MCP]
-    B --> C[Selecionar candidato pelo contexto]
-    C --> D[Chamar get_statements no Wikidata MCP]
-    D --> E[Manter relações diretas entre entidades resolvidas]
+    B --> C[Chamar get_statements para cada candidato]
+    C --> D[Construir caminhos entre grupos com até dois saltos]
+    D --> E[Excluir intermediários de alto grau]
+    E --> F[LLM seleciona um QID fornecido por grupo não vazio]
+    F --> G{Seleções válidas e completas?}
+    G -- Sim --> H[Manter relações diretas entre entidades selecionadas]
+    G -- Não --> I{Restam tentativas de desambiguação?}
+    I -- Sim --> J[Reenviar somente grupos pendentes ao LLM]
+    J --> F
+    I -- Não --> K[Retornar HTTP 422]
 ```
 
 **Saída do bloco:** entidades identificadas, suas declarações e relações
@@ -63,13 +70,14 @@ indisponibilidade encerra a requisição.
 ```mermaid
 flowchart TD
     A[Montar payload com texto, entidades e relações]
-    A --> B[Solicitar RDF/Turtle ao Ollama]
-    B --> C[Remover somente cercas e notas externas]
-    C --> D[Validar com rdflib]
-    D --> E{Turtle é válido?}
-    E -- Sim --> F[Garantir rótulos e concluir RDF]
-    E -- Não --> G{Ainda há tentativas?]
-    G -- Sim --> B
+    A --> B[Solicitar triplas JSON ao Ollama com schema]
+    B --> C[Validar campos, identificadores e metadados de literais]
+    C --> D[Normalizar nomes kg e construir grafo RDFLib]
+    D --> E{Serialização Turtle válida?}
+    E -- Sim --> F[Aplicar pós-condições de IDs e rótulos e revalidar]
+    E -- Não --> G{Ainda há tentativas?}
+    G -- Sim --> I[Adicionar resposta anterior e erro ao prompt]
+    I --> B
     G -- Não --> H[Retornar erro HTTP 422]
 ```
 

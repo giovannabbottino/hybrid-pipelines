@@ -10,6 +10,8 @@ from typing import Any
 
 import requests
 
+from ..domain.structured_rdf import RDF_TRIPLES_SCHEMA
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,6 +113,8 @@ class OllamaClient:
             payload["format"] = "json"
         elif stage == "candidate_disambiguation":
             payload["format"] = _CANDIDATE_DISAMBIGUATION_SCHEMA
+        elif stage == "rdf_build":
+            payload["format"] = RDF_TRIPLES_SCHEMA
         options = dict(self.config.options)
         if stage == "candidate_disambiguation":
             configured_limit = options.get("num_predict")

@@ -19,6 +19,7 @@ from ..domain.models import (
     WikidataPath,
     WikidataRelationship,
 )
+from ..domain.structured_rdf import model_response_to_turtle
 from ..infrastructure.request_logger import RequestLogger
 
 
@@ -276,9 +277,8 @@ class HybridAgentService:
             raise CandidateDisambiguationError(
                 "Candidate disambiguation failed.",
                 attempts=attempts,
-                last_error=last_error or (
-                    "Missing selections for mention indices: " + ", ".join(map(str, missing_indices))
-                ),
+                last_error=last_error
+                or ("Missing selections for mention indices: " + ", ".join(map(str, missing_indices))),
             )
 
         self._log(
@@ -354,8 +354,9 @@ class HybridAgentService:
         original_prompt = self._build_rdf_prompt(text, entities, relationships)
         prompt = original_prompt
         for attempt in range(1, attempts + 1):
-            rdf = self._build_rdf(prompt, key, deadline)
+            model_response = self._build_rdf(prompt, key, deadline)
             try:
+                rdf = model_response_to_turtle(model_response)
                 _parse_rdf(rdf)
                 rdf = _ensure_entity_labels(
                     rdf,
@@ -381,8 +382,8 @@ class HybridAgentService:
             if attempt < attempts:
                 prompt = _build_retry_prompt(
                     original_prompt,
-                    rdf,
-                    last_error or "Invalid Turtle RDF.",
+                    model_response,
+                    last_error or "Invalid structured RDF response.",
                 )
 
         raise RDFValidationError(
@@ -417,7 +418,7 @@ class HybridAgentService:
             timeout_seconds=timeout_seconds,
         ).strip()
         self._log(key, "llm_rdf_response", {"response": rdf})
-        return _strip_code_fence(rdf)
+        return rdf
 
     def _remaining_timeout(self, deadline: float | None) -> float | None:
         if deadline is None:
@@ -588,7 +589,17 @@ def _supplement_mentions(
         ),
     )
     ignored_modifiers = {
-        "a", "an", "and", "as", "in", "its", "of", "on", "or", "the", "to",
+        "a",
+        "an",
+        "and",
+        "as",
+        "in",
+        "its",
+        "of",
+        "on",
+        "or",
+        "the",
+        "to",
     }
     for match in descriptor_matches:
         modifier = match.group("modifier")
@@ -701,8 +712,7 @@ def _compact_candidate_group(group: WikidataCandidateGroup) -> dict[str, Any]:
                 "type_statements": [
                     statement
                     for statement in candidate.statements
-                    if str(statement.get("property_id") or statement.get("property") or "")
-                    in {"P31", "P279"}
+                    if str(statement.get("property_id") or statement.get("property") or "") in {"P31", "P279"}
                 ][:4],
             }
             for candidate in group.candidates
@@ -768,9 +778,7 @@ def _ensure_entity_labels(
     graph.bind("wd", wd)
     graph.bind("kg", kg)
 
-    allowed_qids = {
-        entity.id for entity in entities if entity.id and re.fullmatch(r"Q\d+", entity.id)
-    }
+    allowed_qids = {entity.id for entity in entities if entity.id and re.fullmatch(r"Q\d+", entity.id)}
     allowed_qids.update(
         entity_id
         for relationship in relationships
@@ -804,9 +812,7 @@ def _ensure_entity_labels(
         if object_label:
             known_labels.setdefault(relationship.object_id, object_label)
 
-        if re.fullmatch(r"Q\d+", relationship.subject_id) and re.fullmatch(
-            r"Q\d+", relationship.object_id
-        ):
+        if re.fullmatch(r"Q\d+", relationship.subject_id) and re.fullmatch(r"Q\d+", relationship.object_id):
             graph.add(
                 (
                     wd[relationship.subject_id],
@@ -897,18 +903,12 @@ def _ensure_text_cooccurrence_relations(
 
 def _is_classlike_mention(mention: EntityMention) -> bool:
     entity_type = str(mention.entity_type or "").casefold()
-    return any(
-        marker in entity_type
-        for marker in ("class", "concept", "object", "nationality")
-    )
+    return any(marker in entity_type for marker in ("class", "concept", "object", "nationality"))
 
 
 def _discourse_segments(text: str) -> list[tuple[int, int]]:
     boundaries = [0]
-    boundaries.extend(
-        match.end()
-        for match in re.finditer(r"(?<=[.!?])\s+(?=[A-Z])", text)
-    )
+    boundaries.extend(match.end() for match in re.finditer(r"(?<=[.!?])\s+(?=[A-Z])", text))
     boundaries.append(len(text))
     sentence_spans = [
         (boundaries[index], boundaries[index + 1])
@@ -963,20 +963,17 @@ def _relationship_predicate(
     return kg[local_name]
 
 
-def _build_retry_prompt(original_prompt: str, invalid_rdf: str, parser_error: str) -> str:
+def _build_retry_prompt(original_prompt: str, invalid_response: str, parser_error: str) -> str:
     error = parser_error[:1200]
-    previous = invalid_rdf[:6000]
+    previous = invalid_response[:6000]
     return (
         f"{original_prompt}\n\n"
-        "The previous answer was not valid Turtle RDF when parsed with rdflib Graph.parse.\n"
-        f"Parser error:\n{error}\n\n"
-        "Regenerate the complete document so every statement conforms to the standard "
-        "RDF/Turtle grammar and the full response parses without errors with "
-        "rdflib.Graph.parse(format=\"turtle\"). Treat the parser error only as a "
-        "diagnostic: review and correct the entire RDF document, not only the reported "
-        "line. Return only the corrected Turtle RDF without markdown, comments, or "
-        "explanations.\n"
-        f"Previous invalid RDF:\n{previous}"
+        "The previous structured RDF JSON could not be converted to RDF.\n"
+        f"Validation error:\n{error}\n\n"
+        "Return the complete corrected JSON object using the required triples schema. Every "
+        "triple needs subject, predicate, object, and object_type. Return JSON only, without "
+        "Turtle, markdown, comments, or explanations.\n"
+        f"Previous invalid response:\n{previous}"
     )
 
 

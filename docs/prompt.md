@@ -7,7 +7,7 @@ The hybrid pipeline uses one system prompt and three task prompts:
 - `prompt/prompts/candidate-disambiguation.txt`
 - `prompt/prompts/rdf-build.txt`
 
-The LLM calls extract entity mentions, disambiguate Wikidata candidate groups, and build RDF/Turtle from the selected entities and Wikidata evidence.
+The LLM calls extract entity mentions, disambiguate Wikidata candidate groups, and build structured RDF triples from the selected entities and Wikidata evidence. The application serializes the triples to Turtle.
 
 ## System prompt
 
@@ -17,7 +17,7 @@ The system prompt defines the model as a Wikidata-grounded knowledge graph const
 
 - return only the format requested by the task prompt;
 - do not include markdown fences;
-- when asked for Turtle/RDF, return Turtle syntax only;
+- for RDF construction, return only the structured triple JSON object;
 - avoid introductions, explanations, examples, templates, and notes;
 - when building RDF, include `rdfs:label` for every subject and object resource;
 - prefer entity-to-entity triples and a small stable predicate vocabulary so generated graphs can be evaluated with label-based SPARQL.
@@ -87,7 +87,7 @@ Expected output:
 
 File: `prompt/prompts/rdf-build.txt`
 
-This prompt asks the model to build RDF/Turtle using a JSON payload prepared by the service.
+This prompt asks the model to build structured RDF triples using a JSON payload prepared by the service.
 
 Runtime placeholder:
 
@@ -108,27 +108,15 @@ The payload includes:
 
 Entities are compacted before they are sent to the model. Statement lists are sorted so priority properties appear first, then truncated to keep the prompt smaller.
 
-The RDF prompt requires the response to start with these prefixes:
+The RDF-build response is a JSON object with a non-empty `triples` array. Every item has
+`subject`, `predicate`, `object`, and `object_type`; literal items may also have `language` or
+`datatype`.
 
-```turtle
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix wd: <http://www.wikidata.org/entity/> .
-@prefix kg: <https://example.org/wikidata-description/> .
-```
+Important structured RDF rules:
 
-Important RDF rules:
-
-- the first character must be `@`;
-- return valid Turtle only;
-- do not use markdown or code fences;
-- declare every used prefix in the same response before its first use;
-- include the exact `kg:` declaration whenever a `kg:` name is used;
-- never place two objects next to each other without Turtle punctuation;
-- use `,` only for multiple objects of the same predicate;
-- use `;` for a different predicate on the same subject and write that predicate after `;`;
-- terminate each subject statement with `.`;
-- use `rdfs:label` for every `wd:Q...` entity in the graph;
-- use `rdfs:label` for every generated `kg:` entity, concept, class, place, person, organization, event, and object that appears as a subject or object;
+- return JSON only without Turtle, prefixes, Markdown, or prose;
+- use `object_type: "resource"` for identifiers and `object_type: "literal"` for values;
+- use `rdfs:label` literals for every `wd:Q...` and generated `kg:` resource;
 - prefer entity-to-entity triples over literal-only descriptions so SPARQL evaluation can traverse from a subject label to an answer label;
 - use `kg:is` for "entity is description entity", type, class, category, and instance-of relationships unless a more specific provided Wikidata relationship is directly supported;
 - prefer the shared predicate vocabulary when it fits the text: `kg:is`, `kg:of`, `kg:from`, `kg:in`, `kg:on`, `kg:to`, `kg:with`, `kg:has_part`, `kg:part_of`, `kg:located_in`, and `kg:instance_of`;
@@ -148,18 +136,12 @@ For good evaluation behavior, the RDF build prompt should keep these properties 
 - Wikidata QIDs are used only when provided by the entities or relationships payload;
 - generated `kg:` resources are acceptable for concepts that are present in the text but not resolved to provided QIDs.
 
-## Runtime cleanup and validation
+## Runtime construction and validation
 
-The RDF returned by Ollama has response wrappers removed and is then parsed strictly:
-
-- fenced code blocks are unwrapped;
-- text before the first `@prefix` is removed;
-- trailing notes or explanations are removed when they start with common note markers.
-- the candidate RDF is parsed with `rdflib.Graph.parse(format="turtle")`;
-- when parsing fails and attempts remain, the same model stage is asked to return corrected Turtle using the parser error and previous invalid RDF. The API defaults to three attempts;
-- no local syntax repair, statement salvage, or deterministic substitute is used after an LLM failure.
-
-If every attempt fails, the API returns an RDF parse error instead of invalid Turtle.
+The structured response is validated, unsafe `kg:` names are normalized, and terms are added to an
+RDFLib graph. Existing hybrid post-processing preserves approved Wikidata IDs, materializes supplied
+relationships, and completes human-readable labels. The graph is serialized to Turtle and parsed
+before it is returned. Invalid structured responses are retried up to three times.
 
 ## Editing guidelines
 
@@ -168,11 +150,9 @@ When editing these prompts:
 - keep `${TEXT}` in the entity extraction prompt;
 - keep `${PAYLOAD}` in the candidate disambiguation prompt;
 - keep `${PAYLOAD}` in the RDF build prompt;
-- keep the required RDF prefixes declared if the prompt or examples use them;
-- avoid introducing undeclared prefixes such as `ex:`;
-- keep the shared mandatory Turtle syntax block identical to the prompt-based and ontology-based pipelines;
+- keep the structured triple fields identical to the prompt-based and ontology-based pipelines;
 - keep the entity extraction output as strict JSON;
-- keep RDF output instructions concise and strict;
+- keep structured JSON output instructions concise and strict;
 - keep labels mandatory for all subject/object resources;
 - keep entity-to-entity relationships preferred for facts that downstream SPARQL should be able to test;
 - keep `kg:is` as the default classification/type predicate;

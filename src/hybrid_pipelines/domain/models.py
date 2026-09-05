@@ -97,10 +97,7 @@ class WikidataPath:
         return len(self.edges)
 
     def to_text(self) -> str:
-        return " ".join(
-            f"{edge.subject_label} {edge.property_label} {edge.object_label}."
-            for edge in self.edges
-        )
+        return " ".join(f"{edge.subject_label} {edge.property_label} {edge.object_label}." for edge in self.edges)
 
     def to_dict(self) -> dict[str, Any]:
         return {

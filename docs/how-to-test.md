@@ -3,7 +3,7 @@
 Tests are organized under `tests/unit/`.
 
 - `test_agent_service.py` covers service orchestration, entity extraction parsing, Wikidata resolution calls, relationship handling, RDF build prompting, and response shape.
-- `test_prompts.py` checks required prefixes and verifies that the RDF-build and system prompts share the canonical prefix-binding and Turtle-punctuation rules.
+- `test_prompts.py` verifies that the RDF-build and system prompts share the structured-triple fields and identifier rules.
 
 ## Run all tests
 
@@ -42,3 +42,9 @@ python -m pytest
 - The project uses the standard `src` layout. Tests use `pythonpath = src` from `pytest.ini`, so run them from the repository root.
 - Pytest writes temporary files under `.pytest-runtime` through the configured `--basetemp`.
 - The automated tests do not require Ollama or live Wikidata access; external services are stubbed.
+
+## Structured RDF checks
+
+`tests/unit/test_structured_rdf.py` checks graph serialization and required fields.
+Client tests check schema forwarding; service tests cover validation retries.
+Prompt tests check the JSON contract. Run the full suite after changing these layers.

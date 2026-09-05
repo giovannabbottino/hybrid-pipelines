@@ -70,9 +70,7 @@ def test_rejects_non_integer_rdf_attempt_count() -> None:
     )
 
     assert response.status_code == 400
-    assert response.get_json() == {
-        "error": "Field 'max_rdf_attempts' must be an integer."
-    }
+    assert response.get_json() == {"error": "Field 'max_rdf_attempts' must be an integer."}
 
 
 def test_rejects_non_string_idempotence_key() -> None:
@@ -82,9 +80,7 @@ def test_rejects_non_string_idempotence_key() -> None:
     )
 
     assert response.status_code == 400
-    assert response.get_json() == {
-        "error": "Field 'idempotence_key' must be a string."
-    }
+    assert response.get_json() == {"error": "Field 'idempotence_key' must be a string."}
 
 
 def test_rejects_non_object_json_body() -> None:

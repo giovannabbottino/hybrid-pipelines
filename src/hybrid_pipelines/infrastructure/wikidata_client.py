@@ -100,9 +100,7 @@ class WikidataMCPClient:
                 )
             candidates = _rank_candidate_entities(candidates, mention, mention_context)
             type_aligned = [
-                candidate
-                for candidate in candidates
-                if _candidate_type_alignment(candidate, mention.entity_type) > 0
+                candidate for candidate in candidates if _candidate_type_alignment(candidate, mention.entity_type) > 0
             ]
             if type_aligned:
                 candidates = type_aligned
@@ -118,18 +116,8 @@ class WikidataMCPClient:
         expansion_limit: int = 30,
         path_limit: int = 24,
     ) -> list[WikidataPath]:
-        candidate_ids = {
-            candidate.id
-            for group in groups
-            for candidate in group.candidates
-            if candidate.id
-        }
-        labels = {
-            candidate.id: candidate.label
-            for group in groups
-            for candidate in group.candidates
-            if candidate.id
-        }
+        candidate_ids = {candidate.id for group in groups for candidate in group.candidates if candidate.id}
+        labels = {candidate.id: candidate.label for group in groups for candidate in group.candidates if candidate.id}
         edges: list[WikidataRelationship] = []
         edge_keys: set[tuple[str, str, str]] = set()
 
@@ -146,13 +134,9 @@ class WikidataMCPClient:
                     )
 
         if max_hops > 1:
-            intermediate_ids = sorted(
-                {
-                    edge.object_id
-                    for edge in edges
-                    if edge.object_id not in candidate_ids
-                }
-            )[: max(0, int(expansion_limit))]
+            intermediate_ids = sorted({edge.object_id for edge in edges if edge.object_id not in candidate_ids})[
+                : max(0, int(expansion_limit))
+            ]
             for entity_id in intermediate_ids:
                 if entity_id not in self._statement_cache:
                     self._statement_cache[entity_id] = self.get_statements(entity_id)
@@ -327,9 +311,7 @@ class WikidataMCPClient:
         if "error" in data:
             raise requests.RequestException(str(data["error"]))
         self._session_id = (
-            response.headers.get("Mcp-Session-Id")
-            or response.headers.get("mcp-session-id")
-            or self._session_id
+            response.headers.get("Mcp-Session-Id") or response.headers.get("mcp-session-id") or self._session_id
         )
         self._initialized = True
         with suppress(requests.RequestException):
@@ -479,9 +461,7 @@ def _coerce_statements(result: Any) -> list[dict[str, Any]]:
         return [item for item in result if isinstance(item, dict)]
     if isinstance(result, str):
         statements = []
-        pattern = re.compile(
-            r"^(.*?)\s+\((Q\d+)\):\s+(.*?)\s+\((P\d+)\):\s+(.*?)\s+\((Q\d+)\)$"
-        )
+        pattern = re.compile(r"^(.*?)\s+\((Q\d+)\):\s+(.*?)\s+\((P\d+)\):\s+(.*?)\s+\((Q\d+)\)$")
         for line in result.splitlines():
             match = pattern.match(line.strip())
             if not match:
@@ -712,9 +692,7 @@ def _shortest_relationship_path(
     max_hops: int,
     blocked: set[str],
 ) -> list[WikidataRelationship]:
-    queue: deque[tuple[str, list[WikidataRelationship], set[str]]] = deque(
-        [(source_id, [], {source_id})]
-    )
+    queue: deque[tuple[str, list[WikidataRelationship], set[str]]] = deque([(source_id, [], {source_id})])
     while queue:
         node_id, path, visited = queue.popleft()
         if len(path) >= max_hops:
@@ -742,11 +720,7 @@ def _mention_context(
         return context
     previous_boundaries = [context.rfind(mark, 0, mention.start) for mark in ".!?\n"]
     start = max(previous_boundaries) + 1
-    following = [
-        position
-        for mark in ".!?\n"
-        if (position := context.find(mark, mention.end)) >= 0
-    ]
+    following = [position for mark in ".!?\n" if (position := context.find(mark, mention.end)) >= 0]
     end = min(following) + 1 if following else len(context)
     return context[start:end]
 
@@ -757,11 +731,7 @@ def _normalized_name(value: str) -> str:
 
 def _terms(text: str) -> set[str]:
     stopwords = {"a", "an", "the", "is", "are", "was", "were", "not", "from", "of", "in", "on", "to", "and", "or"}
-    return {
-        term
-        for term in re.findall(r"[a-z][a-z-]+", text.casefold())
-        if term not in stopwords and len(term) > 2
-    }
+    return {term for term in re.findall(r"[a-z][a-z-]+", text.casefold()) if term not in stopwords and len(term) > 2}
 
 
 def _statement_edges(statement: dict[str, Any]) -> list[dict[str, str]]:

@@ -40,4 +40,9 @@ def test_structured_stages_enable_ollama_json_contract(monkeypatch, tmp_path: Pa
     assert selection_schema["items"]["additionalProperties"] is False
     assert selection_schema["items"]["properties"]["selected_id"]["pattern"] == "^Q[1-9][0-9]*$"
     assert payloads[1]["options"]["num_predict"] == 512
-    assert "format" not in payloads[2]
+    rdf_schema = payloads[2]["format"]
+    assert rdf_schema["required"] == ["triples"]
+    assert rdf_schema["additionalProperties"] is False
+    triple_schema = rdf_schema["properties"]["triples"]["items"]
+    assert triple_schema["required"] == ["subject", "predicate", "object", "object_type"]
+    assert triple_schema["additionalProperties"] is False

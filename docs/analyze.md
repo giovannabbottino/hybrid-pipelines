@@ -62,8 +62,8 @@ Wikidata MCP is the only evidence source. An MCP failure fails the request.
 10. Translate each path to text and ask the LLM to select exactly one supplied QID for every non-empty candidate group. Valid partial selections are accumulated and only pending groups are retried, for at most three attempts. The service never chooses a candidate automatically; an unknown, malformed, duplicate, extra, cross-group, or ultimately missing QID returns HTTP 422.
 11. Keep direct relationships where a selected entity statement points to another selected entity.
 12. Load the RDF build prompt, inject a JSON payload with text, source attribution, compact selected entities, and relationships.
-13. Ask the LLM to return RDF/Turtle and strip code fences or trailing notes when present.
-14. Strictly validate the RDF with `rdflib.Graph.parse(format="turtle")`. If parsing fails, retry the same model stage with both the parser error and the previous invalid RDF. Return immediately when parsing succeeds; no local RDF repair or deterministic substitute is attempted.
+13. Ask the LLM for structured triples under the shared JSON schema.
+14. Validate identifiers and literal metadata, build an RDFLib graph, apply the existing Wikidata-ID and label postconditions, and serialize it to Turtle. Invalid structured responses are retried with validation feedback.
 15. Return the analysis response, including auditable NED candidates and paths, and write request events/LLM CSV logs when configured.
 
 ### Success response
@@ -118,10 +118,14 @@ Wikidata MCP is the only evidence source. An MCP failure fails the request.
 |--------|-------|----------------|
 | `400` | Missing or blank `text`, or invalid local prompt path | `{ "error": "..." }` |
 | `502` | External service request failed, model request failed, or runtime generation error | `{ "error": "...", "details": "..." }` |
-| `422` | The model did not complete strict candidate disambiguation or did not return valid Turtle RDF after the configured attempts | `{ "error": "Candidate disambiguation failed.", "attempts": 3, "details": "..." }` or `{ "error": "RDF parsing failed.", "attempts": 3, "details": "..." }` |
+| `422` | The model did not complete candidate disambiguation or did not return valid structured triples after the configured attempts | `{ "error": "Candidate disambiguation failed.", "attempts": 3, "details": "..." }` or `{ "error": "RDF parsing failed.", "attempts": 3, "details": "..." }` |
 | `504` | External service timeout | `{ "error": "External service request timed out.", "details": "...", "hint": "..." }` |
 
 ## Logs
 
 - Ollama generations are written to `OLLAMA_CSV_PATH` with `stage`, `model`, `prompt`, `response`, `created_at`, `done`, and `total_duration`.
 - Agent events are written to `ANALYZE_LOG_PATH` when configured. Events share the provided or generated `idempotence_key`.
+
+See the [structured RDF contract](structured-rdf.md) for identifier normalization,
+literal metadata, and legacy custom-client compatibility, and the
+[pipeline diagrams](diagrams.md) for generation and retry boundaries.
