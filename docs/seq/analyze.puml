@@ -1,83 +1,73 @@
 @startuml
-actor User
-boundary ClientApp as Client
-
-box "Flask App" #EFEFEF
-  control "Analyze Controller" as Controller
-  control "HybridAgentService" as Agent
-  entity "PromptRepository" as Repo
-  control "OllamaClient" as LLM
-  control "WikidataMCPClient" as WD
-end box
-
-collections "Prompt files\n(prompt/)" as PromptFiles
-database "Analyze event log\n(ANALYZE_LOG_PATH)" as EventLog
-database "Ollama CSV log\n(OLLAMA_CSV_PATH)" as CSV
-boundary "Ollama /api/generate" as Ollama
-boundary "Wikidata MCP" as Wikidata
-
-User -> Client: Request analysis
-Client -> Controller ++: POST /analyze {"text": "...", "idempotence_key": "..."}
-Controller -> Controller: validate and trim text
-Controller -> Agent ++: AnalyzeRequest(text, idempotence_key)
-
-Agent -> EventLog: append analyze_started
-
-Agent -> Repo ++: load system prompt
-Repo -> PromptFiles: read system/agent.txt
-Repo --> Agent --: system prompt text
-
-Agent -> Repo ++: load entity extraction prompt
-Repo -> PromptFiles: read prompts/entity-extraction.txt
-Repo --> Agent --: entity prompt template
-
-Agent -> Agent: replace ${TEXT} with input text
-Agent -> EventLog: append llm_entity_request
-
-Agent -> LLM ++: generate(system_prompt, entity_prompt, stage="entity_extraction")
-LLM -> Ollama ++: POST /api/generate {model, system, prompt, stream:false}
-Ollama --> LLM --: JSON payload with extraction text
-LLM -> CSV: append entity_extraction row
-LLM --> Agent --: raw entity extraction JSON
-
-Agent -> EventLog: append llm_entity_response
-Agent -> Agent: strictly parse JSON, realign mentions, supplement patterns, dedupe, apply configured limit
-
-loop each mention
-  Agent -> WD ++: resolve entity mention
-  WD -> Wikidata ++: tools/call search_items
-  Wikidata --> WD --: candidate entities
-  WD -> Wikidata ++: tools/call get_statements
-  Wikidata --> WD --: statements
-  WD --> Agent --: resolved WikidataEntity
+skinparam backgroundColor #FFFFFF
+skinparam shadowing false
+skinparam defaultFontName SansSerif
+skinparam defaultFontSize 14
+skinparam ArrowColor #375A7F
+skinparam sequenceParticipantBackgroundColor #EAF1F8
+skinparam activityBackgroundColor #EAF1F8
+skinparam activityBorderColor #375A7F
+skinparam activityDiamondBackgroundColor #FFF3D6
+title Hybrid pipelines: POST /analyze
+actor Client
+control "Analyze controller" as API
+control "Application service" as Service
+participant "Ollama /api/generate" as LLM
+control "Structured RDF converter / RDFLib" as RDF
+Client -> API: POST /analyze (text, max_rdf_attempts?, options?)
+API -> API: Validate fields and trim text
+API -> Service: AnalyzeRequest
+Service -> Service: Load prompt files; start correlated event log
+participant "Wikidata MCP client" as MCP
+Service -> LLM: Extract mentions from input text
+LLM --> Service: Entity extraction JSON
+Service -> Service: Strict parsing, realignment, supplementation and deduplication
+loop Each mention and its candidate group
+  Service -> MCP: search_items, then get_statements for every candidate
+  MCP --> Service: Candidate entities and statements
 end
+Service -> MCP: Build bounded cross-mention paths (at most two hops)
+MCP --> Service: Paths with high-degree intermediates excluded
+loop Up to three disambiguation attempts, pending groups only
+  Service -> LLM: Text, candidate groups and path context; selection JSON schema
+  LLM --> Service: Supplied QID selections
+  Service -> Service: Validate selections; accumulate valid groups
+end
+note over Service
+  No automatic candidate selection.
+  Unresolved or invalid selections after retries: HTTP 422.
+end note
+Service -> MCP: Retain direct relationships among selected entities
+MCP --> Service: Grounded relationship evidence
+Service -> Service: Build RDF prompt from text and selected evidence
 
-Agent -> EventLog: append wikidata_entities
-
-Agent -> WD ++: find_relationships(resolved entities)
-WD --> Agent --: direct relationships among resolved entities
-Agent -> EventLog: append wikidata_relationships
-
-Agent -> Repo ++: load RDF build prompt
-Repo -> PromptFiles: read prompts/rdf-build.txt
-Repo --> Agent --: RDF prompt template
-
-Agent -> Agent: build payload with text, Source: Wikidata, entities, relationships
-Agent -> Agent: replace ${PAYLOAD} with JSON payload
-Agent -> EventLog: append llm_rdf_request
-
-Agent -> LLM ++: generate(system_prompt, rdf_prompt, stage="rdf_build")
-LLM -> Ollama ++: POST /api/generate {model, system, prompt, stream:false}
-Ollama --> LLM --: JSON payload with Turtle response
-LLM -> CSV: append rdf_build row
-LLM --> Agent --: RDF/Turtle text
-
-Agent -> Agent: strip code fences and trailing notes
-Agent -> Agent: strictly parse Turtle; retry same LLM stage if configured
-Agent -> EventLog: append rdf_built
-
-Agent --> Controller --: AnalyzeResponse
-Controller --> Client --: 200 {text, entities, relationships, rdf, source_attribution, llm}
-Client --> User: Show result
-
+loop Up to max_rdf_attempts (clamped to 1-3), stop on success
+  Service -> LLM: Generate RDF triples with JSON schema
+  note right of LLM
+    JSON schema constrains the RDF response.
+    CSV records the raw model output.
+  end note
+  LLM --> Service: Structured triples JSON
+  Service -> RDF: Validate fields, identifiers and literal metadata
+  RDF -> RDF: Normalize kg names; create RDF terms and Graph
+  RDF -> RDF: Serialize Turtle; parse and check graph postconditions
+  alt Valid graph
+    Service -> RDF: Apply Wikidata-ID and label postconditions; revalidate
+    RDF --> Service: Validated Turtle string
+    Service --> API: AnalyzeResponse
+    API --> Client: HTTP 200 (text, entities, relationships, rdf, source_attribution, llm, ned)
+  else Invalid response and attempts remain
+    RDF --> Service: Validation error
+    Service -> Service: Add previous output and error to retry prompt/history
+  else Attempts exhausted
+    RDF --> Service: Validation error
+    Service --> API: RDFValidationError
+    API --> Client: HTTP 422 (error, attempts, details)
+  end
+end
+note over Service, RDF
+  Bundled clients request JSON; custom clients may supply valid legacy Turtle.
+  RDF regeneration reuses existing grounding evidence.
+  Request events record validation outcomes when logging is configured.
+end note
 @enduml

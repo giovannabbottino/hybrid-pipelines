@@ -7,7 +7,7 @@ name = "hybrid-pipelines"
 version = "1.0.0"
 description = "Wikidata-grounded knowledge graph pipeline using Ollama."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
 license = { file = "LICENSE" }
 dependencies = [
     "Flask==3.0.0",
@@ -32,10 +32,12 @@ where = ["src"]
 [tool.pyright]
 include = ["src", "tests"]
 extraPaths = ["src"]
-pythonVersion = "3.10"
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 120
 src = ["src", "tests"]
 

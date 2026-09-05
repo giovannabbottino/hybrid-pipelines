@@ -3,7 +3,7 @@
 Tests are organized under `tests/unit/`.
 
 - `test_agent_service.py` covers service orchestration, entity extraction parsing, Wikidata resolution calls, relationship handling, RDF build prompting, and response shape.
-- `test_prompts.py` checks important RDF prompt constraints such as required prefixes and no undeclared `ex:` prefix.
+- `test_prompts.py` verifies that the RDF-build and system prompts share the structured-triple fields and identifier rules.
 
 ## Run all tests
 
@@ -24,8 +24,7 @@ python -m pytest tests/unit/test_prompts.py
 
 GitHub Actions runs `.github/workflows/ci.yml` for every push, pull request, and manual dispatch. The workflow:
 
-- runs Ruff and Pyright on Python 3.13;
-- runs the test suite on Python 3.10 and 3.13;
+- runs Ruff, Pyright, and the test suite on Python 3.12;
 - caches downloaded pip packages;
 - cancels an older run when a newer commit is pushed to the same branch.
 
@@ -43,3 +42,9 @@ python -m pytest
 - The project uses the standard `src` layout. Tests use `pythonpath = src` from `pytest.ini`, so run them from the repository root.
 - Pytest writes temporary files under `.pytest-runtime` through the configured `--basetemp`.
 - The automated tests do not require Ollama or live Wikidata access; external services are stubbed.
+
+## Structured RDF checks
+
+`tests/unit/test_structured_rdf.py` checks graph serialization and required fields.
+Client tests check schema forwarding; service tests cover validation retries.
+Prompt tests check the JSON contract. Run the full suite after changing these layers.
