@@ -29,52 +29,24 @@ def test_disambiguation_prompt_restricts_selections_to_supplied_candidates():
     assert '"additionalProperties": false' in prompt
     assert "selected_id must be one of" in prompt
     assert "Never invent, alter, normalize, or substitute a Wikidata ID" in prompt
-    assert "summarized graph_context" in prompt
+    assert "P31/P279 type statements" in prompt
+    assert "graph_context" not in prompt
     assert "Never return the schema itself" in prompt
     assert "never selects a candidate automatically" in prompt
 
 
-def test_rdf_prompt_requires_only_structured_json():
-    prompt = Path("prompt/prompts/rdf-build.txt").read_text(encoding="utf-8")
+def test_rdf_and_system_prompts_require_json_rdf_and_exact_prefixes():
+    from hybrid_pipelines.domain.structured_rdf import RDF_PREFIXES
 
-    assert "structured RDF triples" in prompt
-    assert "Return exactly one JSON object" in prompt
-    assert "Return JSON only" in prompt
-    assert "Do not return Turtle" in prompt
-    assert "`subject`" in prompt
-    assert "`predicate`" in prompt
-    assert "`object_type`" in prompt
-
-
-def test_rdf_prompt_requires_resolved_ids_and_human_labels():
-    prompt = Path("prompt/prompts/rdf-build.txt").read_text(encoding="utf-8")
-
-    assert "Preserve every `entities[].id` QID" in prompt
-    assert "Use each resolved resource in at least one semantic relationship triple" in prompt
-    assert "subject and object QIDs" in prompt
-    assert "Prefer `mention.surface`" in prompt
-    assert "Never use a QID as label text" in prompt
-    assert "Materialize every provided relationship exactly once" in prompt
-    assert "do not add facts" in prompt
-    assert "Never invent, change, normalize, or omit a provided QID" in prompt
-
-
-def test_system_prompt_forbids_qids_as_labels():
-    prompt = Path("prompt/system/agent.txt").read_text(encoding="utf-8")
-
-    assert "never invent a QID" in prompt
-    assert "using `mention.surface` before a canonical label" in prompt
-    assert "Return JSON only" in prompt
-    assert "serializes the" in prompt
-    assert "triples to RDF/Turtle with rdflib" in prompt
-
-
-def test_rdf_and_system_prompts_share_structured_triple_rules():
+    for name in ("prompt/system/agent.txt", "prompt/prompts/rdf-build.txt"):
+        prompt = Path(name).read_text(encoding="utf-8")
+        assert '"rdf"' in prompt
+        assert "non-empty" in prompt
+        assert "Turtle string" in prompt
+        assert RDF_PREFIXES.strip() in prompt
+        assert "Never use a QID as label text" in prompt
+        assert "snake_case" in prompt
     rdf_prompt = Path("prompt/prompts/rdf-build.txt").read_text(encoding="utf-8")
-    system_prompt = Path("prompt/system/agent.txt").read_text(encoding="utf-8")
-
-    for term in ("subject", "predicate", "object", "object_type", "resource", "literal"):
-        assert term in rdf_prompt
-        assert term in system_prompt
-    assert "snake_case" in rdf_prompt
-    assert "snake_case" in system_prompt
+    assert "${PAYLOAD}" in rdf_prompt
+    assert "subject and object QIDs" in rdf_prompt
+    assert "Materialize every provided relationship exactly once" in rdf_prompt

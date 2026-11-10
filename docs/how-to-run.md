@@ -1,130 +1,20 @@
-# How to run
+# Running
 
-## Environment variables
-
-The application loads `.env` when running locally and also accepts regular environment variables. Docker Compose sets defaults for the containerized service.
-
-- `SYSTEM_PROMPT_NAME=system/agent.txt`
-- `ENTITY_EXTRACTION_PROMPT_NAME=prompts/entity-extraction.txt`
-- `RDF_BUILD_PROMPT_NAME=prompts/rdf-build.txt`
-- `OLLAMA_API_URL=http://localhost:11434`
-- `OLLAMA_MODEL=llama3.1:8b`
-- `OLLAMA_CSV_PATH=data/ollama_responses.csv`
-- `OLLAMA_TIMEOUT_SECONDS=300`
-- `OLLAMA_TEMPERATURE=0`
-- `OLLAMA_NUM_PREDICT=1536`
-- `OLLAMA_NUM_CTX=8192`
-- `OLLAMA_DISAMBIGUATION_NUM_PREDICT=512`
-- `ENTITY_MENTION_LIMIT=10`
-- `ANALYZE_LOG_PATH=data/analyze_log.jsonl`
-- `WIKIDATA_MCP_URL=https://wd-mcp.wmcloud.org/mcp/`
-- `WIKIDATA_LANGUAGE=en`
-- `WIKIDATA_TIMEOUT_SECONDS=60`
-- `WIKIDATA_CANDIDATE_LIMIT=3`
-- `WIKIDATA_USER_AGENT=hybrid-pipelines-agent/1.0`
-- `WIKIDATA_MAX_RETRIES=2`
-- `WIKIDATA_RETRY_BACKOFF_SECONDS=2`
-
-Optional Ollama generation options are ignored when blank: `OLLAMA_SEED`, `OLLAMA_TEMPERATURE`, `OLLAMA_TOP_K`, `OLLAMA_TOP_P`, `OLLAMA_MIN_P`, `OLLAMA_STOP`, `OLLAMA_NUM_CTX`, and `OLLAMA_NUM_PREDICT`.
-
-Entity extraction is always assigned to the LLM. Candidate disambiguation is also assigned to the LLM when candidate-group search is available. The configured mention limit is 10, `OLLAMA_NUM_CTX=8192` keeps the compact candidate and RDF prompts in context, `OLLAMA_DISAMBIGUATION_NUM_PREDICT=512` bounds the compact candidate-selection response, `OLLAMA_NUM_PREDICT=1536` bounds RDF output length, and `OLLAMA_TEMPERATURE=0` reduces sampling variability.
-
-`POST /analyze` uses three RDF attempts by default. Set `max_rdf_attempts` from `1` to `3` to control how many times the same model-based RDF stage runs after strict parse failures.
-
-## Requirements
-
-- Python 3.12
-- Ollama with the configured model installed
-- Network access to the configured Wikidata MCP endpoint
-
-## Run with Docker Compose
-
-From the repository root:
+Requires Python 3.12, uv, a running Ollama instance, and access to Wikidata MCP. Run commands from the repository root.
 
 ```powershell
-docker compose up --build -d hybrid-pipelines
-```
-
-On first run, pull the configured model into the Ollama container:
-
-```powershell
-docker exec -it kg-ollama ollama pull llama3.1:8b
-```
-
-Check the service:
-
-```powershell
-Invoke-RestMethod -Method Get -Uri "http://127.0.0.1:5050/health"
-```
-
-Analyze text:
-
-```powershell
-$body = @{
-  text = "Mango is not a fruit from a tree."
-  idempotence_key = "demo-mango-1"
-} | ConvertTo-Json
-
-Invoke-RestMethod `
-  -Method Post `
-  -Uri "http://127.0.0.1:5050/analyze" `
-  -ContentType "application/json" `
-  -Body $body
-```
-
-Docker Compose writes service data under `hybrid-pipelines/data/`.
-
-## Run locally
-
-Run commands from `hybrid-pipelines/`.
-
-### 1. Install Python dependencies
-
-Linux / macOS:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
-```
-
-Windows PowerShell:
-
-```powershell
-python -m venv .venv
+uv venv --python 3.12 --seed .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-### 2. Configure Ollama
-
-```bash
+python -m pip install -e ".[test,lint]"
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ollama pull llama3.1:8b
-ollama serve
-```
-
-### 3. Configure Wikidata access
-
-The default MCP endpoint is:
-
-```powershell
-$env:WIKIDATA_MCP_URL="https://wd-mcp.wmcloud.org/mcp/"
-$env:WIKIDATA_USER_AGENT="hybrid-pipelines-agent/1.0"
-```
-
-Wikidata MCP is mandatory and is the only evidence source. If it is unavailable, the request fails explicitly.
-
-### 4. Run the API
-
-```bash
 python -m hybrid_pipelines
 ```
 
-The service listens on `http://127.0.0.1:5050`.
+If `.env` already exists, edit it without overwriting your settings. Use [.env.example](../.env.example) as the reference; there is no need to set parameters in the terminal. The application loads `.env` and listens on `http://127.0.0.1:5050`.
 
-## Troubleshooting
+```powershell
+Invoke-RestMethod http://127.0.0.1:5050/health
+```
 
-- `/health` returns `503`: inspect the `llm` and `wikidata_mcp` sections to see which dependency is unavailable.
-- Ollama timeout: increase `OLLAMA_TIMEOUT_SECONDS` or reduce `OLLAMA_NUM_PREDICT`.
-- Wikidata timeout or rate limiting: increase `WIKIDATA_TIMEOUT_SECONDS`, keep a descriptive `WIKIDATA_USER_AGENT`, or adjust the MCP retry settings.
-- Empty or weak RDF: inspect `ANALYZE_LOG_PATH` and `OLLAMA_CSV_PATH` to see entity extraction output, resolved entities, and RDF prompt content.
+If the health check returns 503, check which dependency is unavailable. Adjust the model, URLs, limits, and timeouts in `.env`. Runtime logs are written to `logs/`.

@@ -5,18 +5,17 @@ import json
 import os
 import re
 import time
-from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
 import requests
 
+from ..configuration import float_env, int_env
 from ..domain.models import (
     EntityMention,
     WikidataCandidateGroup,
     WikidataEntity,
-    WikidataPath,
     WikidataRelationship,
 )
 
@@ -35,10 +34,10 @@ class WikidataMCPConfig:
         return cls(
             url=os.getenv("WIKIDATA_MCP_URL", "https://wd-mcp.wmcloud.org/mcp/"),
             language=os.getenv("WIKIDATA_LANGUAGE", "en"),
-            timeout_seconds=_float_env("WIKIDATA_TIMEOUT_SECONDS", 60.0),
+            timeout_seconds=float_env("WIKIDATA_TIMEOUT_SECONDS", 60.0),
             user_agent=os.getenv("WIKIDATA_USER_AGENT", "hybrid-pipelines-agent/1.0"),
-            max_retries=_int_env("WIKIDATA_MAX_RETRIES", 2),
-            retry_backoff_seconds=_float_env("WIKIDATA_RETRY_BACKOFF_SECONDS", 2.0),
+            max_retries=int_env("WIKIDATA_MAX_RETRIES", 2),
+            retry_backoff_seconds=float_env("WIKIDATA_RETRY_BACKOFF_SECONDS", 2.0),
         )
 
 
@@ -55,7 +54,6 @@ class WikidataMCPClient:
         self._rpc_ids = itertools.count(1)
         self._session_id: str | None = None
         self._initialized = False
-        self._label_cache: dict[str, str] = {}
         self._statement_cache: dict[str, list[dict[str, Any]]] = {}
 
     def health(self) -> dict[str, Any]:
@@ -86,7 +84,6 @@ class WikidataMCPClient:
                 if entity_id not in self._statement_cache:
                     self._statement_cache[entity_id] = self.get_statements(entity_id)
                 label = _entity_label(item) or mention.surface
-                self._label_cache[entity_id] = label
                 candidates.append(
                     WikidataEntity(
                         mention=mention,
@@ -107,134 +104,6 @@ class WikidataMCPClient:
             candidates = candidates[:candidate_limit]
             groups.append(WikidataCandidateGroup(mention=mention, candidates=candidates))
         return groups
-
-    def find_candidate_paths(
-        self,
-        groups: list[WikidataCandidateGroup],
-        max_hops: int = 2,
-        hub_degree_threshold: int = 25,
-        expansion_limit: int = 30,
-        path_limit: int = 24,
-    ) -> list[WikidataPath]:
-        candidate_ids = {candidate.id for group in groups for candidate in group.candidates if candidate.id}
-        labels = {candidate.id: candidate.label for group in groups for candidate in group.candidates if candidate.id}
-        edges: list[WikidataRelationship] = []
-        edge_keys: set[tuple[str, str, str]] = set()
-
-        for group in groups:
-            for candidate in group.candidates:
-                if candidate.id:
-                    _append_statement_relationships(
-                        candidate.id,
-                        candidate.label,
-                        candidate.statements,
-                        edges,
-                        edge_keys,
-                        labels,
-                    )
-
-        if max_hops > 1:
-            intermediate_ids = sorted({edge.object_id for edge in edges if edge.object_id not in candidate_ids})[
-                : max(0, int(expansion_limit))
-            ]
-            for entity_id in intermediate_ids:
-                if entity_id not in self._statement_cache:
-                    self._statement_cache[entity_id] = self.get_statements(entity_id)
-                _append_statement_relationships(
-                    entity_id,
-                    labels.get(entity_id, self._label_cache.get(entity_id, entity_id)),
-                    self._statement_cache[entity_id],
-                    edges,
-                    edge_keys,
-                    labels,
-                )
-
-        adjacency = _relationship_adjacency(edges)
-        blocked_hubs = {
-            node_id
-            for node_id, neighbors in adjacency.items()
-            if len({neighbor_id for neighbor_id, _ in neighbors}) > max(1, int(hub_degree_threshold))
-            and node_id not in candidate_ids
-        }
-        paths: list[WikidataPath] = []
-        seen_pairs: set[tuple[str, str]] = set()
-        for left_index, left_group in enumerate(groups):
-            for right_group in groups[left_index + 1 :]:
-                for source in left_group.candidates:
-                    if not source.id:
-                        continue
-                    for target in right_group.candidates:
-                        if not target.id or source.id == target.id:
-                            continue
-                        pair = (
-                            min(source.id, target.id),
-                            max(source.id, target.id),
-                        )
-                        if pair in seen_pairs:
-                            continue
-                        path_edges = _shortest_relationship_path(
-                            adjacency,
-                            source.id,
-                            target.id,
-                            max_hops=max(1, min(int(max_hops), 2)),
-                            blocked=blocked_hubs,
-                        )
-                        if not path_edges:
-                            continue
-                        seen_pairs.add(pair)
-                        paths.append(
-                            WikidataPath(
-                                source_id=source.id,
-                                target_id=target.id,
-                                edges=path_edges,
-                            )
-                        )
-                        if len(paths) >= max(1, int(path_limit)):
-                            return paths
-        return paths
-
-    def resolve_entities(
-        self,
-        mentions: list[EntityMention],
-        limit: int = 3,
-        context: str | None = None,
-    ) -> list[WikidataEntity]:
-        entities: list[WikidataEntity] = []
-        for mention in mentions:
-            mention_context = _mention_context(context or "", mention)
-            query = _contextual_query(mention.surface, mention_context)
-            candidates = self.search_items(query, limit=max(limit, 10))
-            chosen = (
-                _choose_candidate(
-                    candidates,
-                    context=mention_context or mention.surface,
-                    surface=mention.surface,
-                )
-                if candidates
-                else {}
-            )
-            entity_id = _entity_id(chosen)
-            label = _entity_label(chosen) or mention.surface
-            iri = f"http://www.wikidata.org/entity/{entity_id}" if entity_id else None
-            statements = []
-            if entity_id is not None and mention.confidence != 0.5:
-                if entity_id not in self._statement_cache:
-                    self._statement_cache[entity_id] = self.get_statements(entity_id)
-                statements = self._statement_cache[entity_id]
-            if entity_id:
-                self._label_cache[entity_id] = label
-            entities.append(
-                WikidataEntity(
-                    mention=mention,
-                    id=entity_id,
-                    iri=iri,
-                    label=label,
-                    description=_entity_description(chosen),
-                    score=_entity_score(chosen),
-                    statements=statements,
-                )
-            )
-        return entities
 
     def search_items(self, query: str, limit: int = 5) -> list[dict[str, Any]]:
         result = self._call_tool("search_items", {"query": query, "lang": self.config.language})
@@ -366,26 +235,6 @@ class WikidataMCPClient:
         if last_exc:
             raise last_exc
         raise requests.RequestException("Wikidata request failed.")
-
-
-def _int_env(name: str, default: int) -> int:
-    value = os.getenv(name)
-    if value in (None, ""):
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
-def _float_env(name: str, default: float) -> float:
-    value = os.getenv(name)
-    if value in (None, ""):
-        return default
-    try:
-        return float(value)
-    except ValueError:
-        return default
 
 
 def _retry_delay(response: requests.Response, default: float) -> float:
@@ -524,46 +373,6 @@ def _entity_score(item: dict[str, Any]) -> float | None:
     return None
 
 
-def _choose_candidate(
-    candidates: list[dict[str, Any]],
-    context: str,
-    surface: str = "",
-) -> dict[str, Any]:
-    context_terms = _terms(context)
-    if not context_terms:
-        return candidates[0]
-
-    normalized_surface = _normalized_name(surface)
-
-    def score(index_and_item: tuple[int, dict[str, Any]]) -> tuple[int, float, int, int]:
-        index, item = index_and_item
-        label = _entity_label(item) or ""
-        normalized_label = _normalized_name(label)
-        label_terms = _terms(label)
-        haystack = " ".join(
-            value
-            for value in (
-                _entity_label(item),
-                _entity_description(item),
-            )
-            if value
-        )
-        overlap = len(context_terms.intersection(_terms(haystack)))
-        label_overlap = (
-            len(_terms(surface) & label_terms) / len(_terms(surface) | label_terms)
-            if _terms(surface) and label_terms
-            else 0.0
-        )
-        return (
-            1 if normalized_surface and normalized_label == normalized_surface else 0,
-            label_overlap,
-            -index,
-            overlap,
-        )
-
-    return max(enumerate(candidates), key=score)[1]
-
-
 _WIKIDATA_TYPE_ROOTS = {
     "person": {"Q5"},
     "organization": {"Q43229"},
@@ -640,75 +449,6 @@ def _candidate_type_alignment(candidate: WikidataEntity, entity_type: str | None
     if type_terms & _terms(" ".join(filter(None, (candidate.label, candidate.description)))):
         return 1
     return 0
-
-
-def _append_statement_relationships(
-    subject_id: str,
-    subject_label: str,
-    statements: list[dict[str, Any]],
-    relationships: list[WikidataRelationship],
-    seen: set[tuple[str, str, str]],
-    labels: dict[str, str],
-) -> None:
-    for statement in statements:
-        for edge in _statement_edges(statement):
-            object_id = edge.get("object_id")
-            if not object_id:
-                continue
-            property_id = edge.get("property_id") or "P?"
-            key = (subject_id, property_id, object_id)
-            if key in seen:
-                continue
-            seen.add(key)
-            object_label = edge.get("object_label") or labels.get(object_id) or object_id
-            if object_label != object_id:
-                labels.setdefault(object_id, object_label)
-            relationships.append(
-                WikidataRelationship(
-                    subject_id=subject_id,
-                    subject_label=subject_label,
-                    property_id=property_id,
-                    property_label=edge.get("property_label") or property_id,
-                    object_id=object_id,
-                    object_label=object_label,
-                )
-            )
-
-
-def _relationship_adjacency(
-    relationships: list[WikidataRelationship],
-) -> dict[str, list[tuple[str, WikidataRelationship]]]:
-    adjacency: dict[str, list[tuple[str, WikidataRelationship]]] = {}
-    for relationship in relationships:
-        adjacency.setdefault(relationship.subject_id, []).append((relationship.object_id, relationship))
-        adjacency.setdefault(relationship.object_id, []).append((relationship.subject_id, relationship))
-    return adjacency
-
-
-def _shortest_relationship_path(
-    adjacency: dict[str, list[tuple[str, WikidataRelationship]]],
-    source_id: str,
-    target_id: str,
-    max_hops: int,
-    blocked: set[str],
-) -> list[WikidataRelationship]:
-    queue: deque[tuple[str, list[WikidataRelationship], set[str]]] = deque([(source_id, [], {source_id})])
-    while queue:
-        node_id, path, visited = queue.popleft()
-        if len(path) >= max_hops:
-            continue
-        for neighbor_id, relationship in adjacency.get(node_id, []):
-            if neighbor_id in visited or (neighbor_id in blocked and neighbor_id != target_id):
-                continue
-            next_path = [*path, relationship]
-            if neighbor_id == target_id:
-                return next_path
-            queue.append((neighbor_id, next_path, {*visited, neighbor_id}))
-    return []
-
-
-def _contextual_query(surface: str, context: str) -> str:
-    return surface
 
 
 def _mention_context(

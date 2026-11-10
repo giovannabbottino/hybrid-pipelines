@@ -4,26 +4,70 @@ import pytest
 import requests
 from rdflib import Graph, URIRef
 
+from hybrid_pipelines.application.mentions import (
+    dedupe_mentions,
+    realign_mentions,
+    supplement_mentions,
+)
+from hybrid_pipelines.application.response_parsing import parse_entity_response, parse_json_object
 from hybrid_pipelines.application.services import (
     CandidateDisambiguationError,
     HybridAgentService,
     RDFValidationError,
-    _dedupe_mentions,
-    _json_from_text,
-    _json_object_from_text,
-    _realign_mentions,
-    _strip_code_fence,
-    _supplement_mentions,
 )
 from hybrid_pipelines.domain.models import (
     AnalyzeRequest,
     EntityMention,
     WikidataCandidateGroup,
     WikidataEntity,
-    WikidataPath,
     WikidataRelationship,
 )
+from hybrid_pipelines.domain.structured_rdf import RDF_PREFIXES
 from hybrid_pipelines.infrastructure.request_logger import RequestLogger
+
+
+def rdf_response(turtle):
+    return json.dumps({"rdf": RDF_PREFIXES + turtle})
+
+
+@pytest.mark.parametrize("invalid", ["", "{}", '{"rdf":""}', '{"rdf":null}', rdf_response("invalid Turtle")])
+def test_rdf_generation_corrects_empty_or_invalid_response_on_third_attempt(invalid):
+    class CorrectingLLM(StubLLM):
+        def __init__(self):
+            super().__init__()
+            self.rdf_prompts = []
+
+        def generate(self, system_prompt, prompt, stage, timeout_seconds=None):
+            if stage != "rdf_build":
+                return super().generate(system_prompt, prompt, stage, timeout_seconds)
+            self.rdf_prompts.append(prompt)
+            if len(self.rdf_prompts) < 3:
+                return invalid
+            return rdf_response('kg:doc rdfs:label "Document"@en .')
+
+    llm = CorrectingLLM()
+    service = HybridAgentService(llm, StubWikidata(), StubPromptRepository())
+    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
+    assert len(llm.rdf_prompts) == 3
+    assert response.rdf.startswith(RDF_PREFIXES)
+    assert "Validation error:" in llm.rdf_prompts[-1]
+    assert 'key, "rdf"' in llm.rdf_prompts[-1]
+
+
+def test_empty_rdf_stops_after_three_attempts():
+    class EmptyRDFLLM(StubLLM):
+        def generate(self, system_prompt, prompt, stage, timeout_seconds=None):
+            if stage == "rdf_build":
+                self.calls.append({"stage": stage})
+                return '{"rdf":""}'
+            return super().generate(system_prompt, prompt, stage, timeout_seconds)
+
+    llm = EmptyRDFLLM()
+    service = HybridAgentService(llm, StubWikidata(), StubPromptRepository())
+    with pytest.raises(RDFValidationError) as error:
+        service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
+    assert error.value.attempts == 3
+    assert len([call for call in llm.calls if call["stage"] == "rdf_build"]) == 3
 
 
 class StubLLM:
@@ -42,18 +86,17 @@ class StubLLM:
                     ]
                 }
             )
-        return json.dumps(
-            {
-                "triples": [
-                    {
-                        "subject": "kg:doc",
-                        "predicate": "kg:mentions",
-                        "object": "kg:mango",
-                        "object_type": "resource",
-                    }
-                ]
-            }
-        )
+        if stage == "candidate_disambiguation":
+            payload = json.loads(prompt.removeprefix("Disambiguate "))
+            return json.dumps(
+                {
+                    "selections": [
+                        {"mention_index": group["mention_index"], "selected_id": group["candidates"][0]["id"]}
+                        for group in payload["candidate_groups"]
+                    ]
+                }
+            )
+        return rdf_response("kg:doc kg:mentions kg:mango .")
 
     def health_check(self):
         return {"status": "ok"}
@@ -63,7 +106,11 @@ class StubWikidata:
     def __init__(self):
         self.mentions = None
 
-    def resolve_entities(self, mentions, limit=3, context=None):
+    def search_candidate_groups(self, mentions, limit=3, context=None):
+        entities = self.build_entities(mentions, limit, context)
+        return [WikidataCandidateGroup(mention=entity.mention, candidates=[entity]) for entity in entities]
+
+    def build_entities(self, mentions, limit=3, context=None):
         self.mentions = mentions
         return [
             WikidataEntity(
@@ -169,7 +216,7 @@ def test_agent_does_not_add_heuristic_words_when_llm_found_entities():
             return super().generate(system_prompt, prompt, stage, timeout_seconds)
 
     class FocusedWikidata(StubWikidata):
-        def resolve_entities(self, mentions, limit=3, context=None):
+        def build_entities(self, mentions, limit=3, context=None):
             self.mentions = mentions
             return [
                 WikidataEntity(
@@ -203,7 +250,7 @@ def test_dedupe_keeps_repeated_surface_at_distinct_offsets_for_ambiguity():
         EntityMention(surface="Jaguar", start=150, end=156),
     ]
 
-    deduped = _dedupe_mentions(mentions)
+    deduped = dedupe_mentions(mentions)
 
     assert [(item.start, item.end) for item in deduped] == [(0, 6), (150, 156)]
 
@@ -213,15 +260,15 @@ def test_entity_json_parser_rejects_malformed_or_non_object_responses():
     top_level = '[{"surface": "technology"}]'
 
     with pytest.raises(json.JSONDecodeError):
-        _json_from_text(truncated)
+        parse_entity_response(truncated)
     with pytest.raises(ValueError, match="JSON object"):
-        _json_from_text(top_level)
+        parse_entity_response(top_level)
 
 
 def test_json_parser_extracts_object_from_markdown_response():
     wrapped = 'Here is the result:\n```json\n{"selections": [{"mention_index": 0, "selected_id": "Q169"}]}\n```\nDone.'
 
-    assert _json_object_from_text(wrapped) == {"selections": [{"mention_index": 0, "selected_id": "Q169"}]}
+    assert parse_json_object(wrapped) == {"selections": [{"mention_index": 0, "selected_id": "Q169"}]}
 
 
 def test_realign_mentions_uses_successive_exact_occurrences():
@@ -231,7 +278,7 @@ def test_realign_mentions_uses_successive_exact_occurrences():
         EntityMention(surface="Jaguar", start=0, end=6),
     ]
 
-    aligned = _realign_mentions(text, mentions)
+    aligned = realign_mentions(text, mentions)
 
     assert [(item.start, item.end) for item in aligned] == [(0, 6), (19, 25)]
 
@@ -248,11 +295,11 @@ def test_agent_retries_until_rdf_is_valid():
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "rdf_build":
                 self.calls.append({"system_prompt": system_prompt, "prompt": prompt, "stage": stage})
-                return self.rdf_responses.pop(0)
+                return rdf_response(self.rdf_responses.pop(0))
             return super().generate(system_prompt, prompt, stage)
 
     class EmptyWikidata(StubWikidata):
-        def resolve_entities(self, mentions, limit=3, context=None):
+        def build_entities(self, mentions, limit=3, context=None):
             return []
 
         def find_relationships(self, entities):
@@ -265,15 +312,15 @@ def test_agent_retries_until_rdf_is_valid():
         prompt_repository=StubPromptRepository(),
     )
 
-    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3))
+    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
 
     rdf_prompts = [call["prompt"] for call in llm.calls if call["stage"] == "rdf_build"]
     assert "ex:mentions" in response.rdf
     assert '"doc"@en' in response.rdf
     assert '"mango"@en' in response.rdf
     assert len(rdf_prompts) == 2
-    assert "previous structured RDF JSON" in rdf_prompts[1]
-    assert "Previous invalid response:\nnot rdf" in rdf_prompts[1]
+    assert "previous RDF response" in rdf_prompts[1]
+    assert "not rdf" in rdf_prompts[1]
 
 
 def test_agent_retries_llm_when_rdf_has_only_prefixes():
@@ -297,13 +344,13 @@ def test_agent_retries_llm_when_rdf_has_only_prefixes():
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "rdf_build":
                 self.calls.append({"system_prompt": system_prompt, "prompt": prompt, "stage": stage})
-                return self.rdf_responses.pop(0)
+                return rdf_response(self.rdf_responses.pop(0))
             return super().generate(system_prompt, prompt, stage)
 
     llm = PrefixOnlyRetryLLM()
     service = HybridAgentService(llm=llm, wikidata=StubWikidata(), prompt_repository=StubPromptRepository())
 
-    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3))
+    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
 
     rdf_prompts = [call["prompt"] for call in llm.calls if call["stage"] == "rdf_build"]
     assert 'rdfs:label "Mango"' in response.rdf
@@ -315,7 +362,7 @@ def test_agent_rejects_doubled_literal_quotes_without_local_repair():
     class QuoteRepairLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "rdf_build":
-                return (
+                return rdf_response(
                     "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
                     "@prefix wd: <http://www.wikidata.org/entity/> .\n"
                     "@prefix kg: <https://example.org/wikidata-description/> .\n"
@@ -330,14 +377,14 @@ def test_agent_rejects_doubled_literal_quotes_without_local_repair():
     )
 
     with pytest.raises(RDFValidationError):
-        service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3))
+        service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
 
 
 def test_agent_adds_missing_labels_for_every_entity_resource():
     class MissingLabelsLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "rdf_build":
-                return (
+                return rdf_response(
                     "@prefix wd: <http://www.wikidata.org/entity/> .\n"
                     "@prefix kg: <https://example.org/wikidata-description/> .\n"
                     "wd:Q1054564 kg:is wd:Q1364 ."
@@ -360,7 +407,7 @@ def test_agent_materializes_wikidata_relationship_and_removes_qid_labels():
     class IncompleteRDFLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "rdf_build":
-                return (
+                return rdf_response(
                     "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
                     "@prefix wd: <http://www.wikidata.org/entity/> .\n"
                     'wd:Q1054564 rdfs:label "Q1054564"@en .'
@@ -386,7 +433,7 @@ def test_agent_links_resolved_entities_in_same_text_segment_and_drops_unknown_qi
     class HallucinatingLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "rdf_build":
-                return (
+                return rdf_response(
                     "@prefix wd: <http://www.wikidata.org/entity/> .\n"
                     "@prefix kg: <https://example.org/wikidata-description/> .\n"
                     "wd:Q999999 kg:is wd:Q888888 ."
@@ -412,8 +459,8 @@ def test_agent_links_resolved_entities_in_same_text_segment_and_drops_unknown_qi
 
 def test_agent_prefers_human_readable_mention_from_text_over_wikidata_label():
     class CanonicalLabelWikidata(StubWikidata):
-        def resolve_entities(self, mentions, limit=3, context=None):
-            entities = super().resolve_entities(mentions, limit, context)
+        def build_entities(self, mentions, limit=3, context=None):
+            entities = super().build_entities(mentions, limit, context)
             return [
                 WikidataEntity(
                     mention=entities[0].mention,
@@ -427,7 +474,7 @@ def test_agent_prefers_human_readable_mention_from_text_over_wikidata_label():
     class MissingLabelsLLM(StubLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
             if stage == "rdf_build":
-                return (
+                return rdf_response(
                     "@prefix wd: <http://www.wikidata.org/entity/> .\n"
                     "@prefix kg: <https://example.org/wikidata-description/> .\n"
                     "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
@@ -468,34 +515,49 @@ def test_agent_raises_timeout_when_max_processing_seconds_is_too_low():
         service.analyze(request)
 
 
-def test_rdf_sanitizer_keeps_only_turtle_from_prose_and_fence():
-    raw = """Here is the Turtle representation:
-
-```turtle
-@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
-@prefix wd: <http://www.wikidata.org/entity/> .
-@prefix kg: <https://example.org/wikidata-description/> .
-
-wd:Q169 rdfs:label "mango"@en .
-```
-
-Please note this is a template.
-"""
-
-    cleaned = _strip_code_fence(raw)
-
-    assert cleaned.startswith("@prefix rdfs:")
-    assert "Here is" not in cleaned
-    assert "Please note" not in cleaned
-
-
 def test_supplement_mentions_adds_explicit_descriptor_concepts():
     text = "A sports car used Type 24. The technology company used a trade name. Apple Records is a record label."
 
-    mentions = _supplement_mentions(text, [], limit=16)
+    mentions = supplement_mentions(text, [], limit=16)
     surfaces = {mention.surface.casefold() for mention in mentions}
 
     assert {"sports car", "24", "technology", "trade", "record"} <= surfaces
+    assert all(mention.source == "lexical_rule" for mention in mentions)
+
+
+def test_realign_mentions_preserves_origin():
+    mention = EntityMention(surface="car", source="lexical_rule", confidence=0.8)
+    aligned = realign_mentions("A car.", [mention])
+    assert aligned[0].source == "lexical_rule"
+    assert aligned[0].confidence == 0.8
+
+
+def test_empty_candidate_groups_skip_disambiguation_and_keep_unresolved_mentions():
+    class NoCandidatesWikidata(StubWikidata):
+        def search_candidate_groups(self, mentions, limit=3, context=None):
+            return [WikidataCandidateGroup(mention=mention) for mention in mentions]
+
+        def find_relationships(self, entities):
+            return []
+
+    llm = StubLLM()
+    service = HybridAgentService(llm, NoCandidatesWikidata(), StubPromptRepository())
+    response = service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
+    assert [entity.mention.surface for entity in response.entities] == ["Mango", "fruit", "tree"]
+    assert all(entity.id is None for entity in response.entities)
+    assert [call["stage"] for call in llm.calls] == ["entity_extraction", "rdf_build"]
+
+
+def test_programming_errors_in_graph_enrichment_are_not_retried(monkeypatch):
+    def broken_enrichment(*args):
+        raise RuntimeError("Unexpected enrichment failure")
+
+    monkeypatch.setattr("hybrid_pipelines.application.services.materialize_relationships", broken_enrichment)
+    llm = StubLLM()
+    service = HybridAgentService(llm, StubWikidata(), StubPromptRepository())
+    with pytest.raises(RuntimeError, match="Unexpected enrichment failure"):
+        service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
+    assert len([call for call in llm.calls if call["stage"] == "rdf_build"]) == 1
 
 
 def test_agent_rejects_invalid_llm_turtle_without_deterministic_fallback():
@@ -509,7 +571,7 @@ def test_agent_rejects_invalid_llm_turtle_without_deterministic_fallback():
                         "stage": stage,
                     }
                 )
-                return "this is not Turtle"
+                return rdf_response("this is not Turtle")
             return super().generate(system_prompt, prompt, stage, timeout_seconds)
 
     llm = InvalidRDFLLM()
@@ -520,7 +582,7 @@ def test_agent_rejects_invalid_llm_turtle_without_deterministic_fallback():
     )
 
     with pytest.raises(RDFValidationError):
-        service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree.", max_rdf_attempts=3))
+        service.analyze(AnalyzeRequest(text="Mango is not a fruit from a tree."))
 
     assert len([call for call in llm.calls if call["stage"] == "rdf_build"]) == 3
 
@@ -528,7 +590,7 @@ def test_agent_rejects_invalid_llm_turtle_without_deterministic_fallback():
 def test_supplement_mentions_prioritizes_name_and_label_descriptors():
     text = "A technology company offers online services. It uses a trade name and operates a record label."
 
-    mentions = _supplement_mentions(text, [], limit=4)
+    mentions = supplement_mentions(text, [], limit=4)
     surfaces = [mention.surface.casefold() for mention in mentions]
 
     assert surfaces == ["trade", "trade name", "record", "record label"]
@@ -553,21 +615,14 @@ def test_agent_disambiguates_wikidata_candidates_before_building_rdf(tmp_path):
 
     class CandidateWikidata(StubWikidata):
         def search_candidate_groups(self, mentions, limit=3, context=None):
-            resolved = super().resolve_entities(mentions, limit, context)
+            resolved = super().build_entities(mentions, limit, context)
             return [
                 WikidataCandidateGroup(mention=mention, candidates=[entity])
                 for mention, entity in zip(mentions, resolved, strict=True)
             ]
 
         def find_candidate_paths(self, groups, **kwargs):
-            relationship = self.find_relationships([group.candidates[0] for group in groups])[0]
-            return [
-                WikidataPath(
-                    source_id=relationship.subject_id,
-                    target_id=relationship.object_id,
-                    edges=[relationship],
-                )
-            ]
+            raise AssertionError("Candidate path retrieval must not run")
 
     llm = DisambiguatingLLM()
     service = HybridAgentService(
@@ -586,7 +641,10 @@ def test_agent_disambiguates_wikidata_candidates_before_building_rdf(tmp_path):
     ]
     assert response.entities[0].id == "Q1054564"
     assert response.ned["candidate_groups"][0]["candidates"][0]["id"] == "Q1054564"
-    assert response.ned["paths"][0]["hops"] == 1
+    assert "paths" not in response.ned
+    assert "path_summary" not in response.ned
+    assert "graph_context" not in llm.calls[1]["prompt"]
+    assert response.relationships
     assert "candidate_disambiguation" in response.llm
     events = [json.loads(line) for line in (tmp_path / "analyze.jsonl").read_text(encoding="utf-8").splitlines()]
     validated = next(event for event in events if event["event"] == "llm_disambiguation_validated")
@@ -612,7 +670,7 @@ def test_agent_retries_and_rejects_id_outside_candidate_group(tmp_path):
             return [WikidataCandidateGroup(mention=mentions[0], candidates=[entity])]
 
         def find_candidate_paths(self, groups, **kwargs):
-            return []
+            raise AssertionError("Candidate path retrieval must not run")
 
     class OneMentionLLM(InvalidSelectionLLM):
         def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds=None) -> str:
@@ -663,14 +721,14 @@ def test_agent_retries_only_missing_disambiguation_selections():
 
     class CandidateWikidata(StubWikidata):
         def search_candidate_groups(self, mentions, limit=3, context=None):
-            resolved = super().resolve_entities(mentions, limit, context)
+            resolved = super().build_entities(mentions, limit, context)
             return [
                 WikidataCandidateGroup(mention=mention, candidates=[entity])
                 for mention, entity in zip(mentions, resolved, strict=True)
             ]
 
         def find_candidate_paths(self, groups, **kwargs):
-            return []
+            raise AssertionError("Candidate path retrieval must not run")
 
     llm = PartialSelectionLLM()
     service = HybridAgentService(

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import json
-import re
 import time
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 from uuid import uuid4
 
 import requests
-from rdflib import Graph, Literal, Namespace, URIRef
-from rdflib.namespace import RDF, RDFS
+from rdflib.exceptions import ParserError
 
 from ..domain.models import (
     AnalyzeRequest,
@@ -16,11 +14,23 @@ from ..domain.models import (
     EntityMention,
     WikidataCandidateGroup,
     WikidataEntity,
-    WikidataPath,
     WikidataRelationship,
 )
-from ..domain.structured_rdf import model_response_to_turtle
+from ..domain.structured_rdf import model_response_to_graph, serialize_graph, validate_graph
 from ..infrastructure.request_logger import RequestLogger
+from .disambiguation import (
+    candidate_group_evidence,
+    disambiguation_evidence,
+    validate_selections,
+)
+from .mentions import mention_from_item, realign_mentions, supplement_mentions
+from .rdf_enrichment import (
+    add_text_cooccurrence_relations,
+    ensure_resource_labels,
+    materialize_relationships,
+    remove_unresolved_resources,
+)
+from .response_parsing import parse_entity_response
 
 
 class LLMClient(Protocol):
@@ -36,12 +46,12 @@ class LLMClient(Protocol):
 
 
 class WikidataClient(Protocol):
-    def resolve_entities(
+    def search_candidate_groups(
         self,
         mentions: list[EntityMention],
         limit: int = 3,
         context: str | None = None,
-    ) -> list[WikidataEntity]: ...
+    ) -> list[WikidataCandidateGroup]: ...
 
     def find_relationships(self, entities: list[WikidataEntity]) -> list[WikidataRelationship]: ...
 
@@ -80,10 +90,6 @@ class HybridAgentService:
         candidate_limit: int = 3,
         analyze_timeout_seconds: float = 540.0,
         mention_limit: int = 10,
-        max_path_hops: int = 2,
-        hub_degree_threshold: int = 25,
-        path_expansion_limit: int = 30,
-        path_limit: int = 24,
     ) -> None:
         self.llm = llm
         self.wikidata = wikidata
@@ -96,58 +102,30 @@ class HybridAgentService:
         self.candidate_limit = max(1, int(candidate_limit))
         self.analyze_timeout_seconds = max(1.0, float(analyze_timeout_seconds))
         self.mention_limit = max(1, int(mention_limit))
-        self.max_path_hops = max(1, min(int(max_path_hops), 2))
-        self.hub_degree_threshold = max(1, int(hub_degree_threshold))
-        self.path_expansion_limit = max(0, int(path_expansion_limit))
-        self.path_limit = max(1, int(path_limit))
 
     def analyze(self, request: AnalyzeRequest) -> AnalyzeResponse:
         key = request.idempotence_key or str(uuid4())
-        timeout_seconds = _coerce_timeout_seconds(
-            getattr(request, "max_processing_seconds", None),
-            self.analyze_timeout_seconds,
-        )
+        timeout_seconds = request.max_processing_seconds or self.analyze_timeout_seconds
         deadline = time.monotonic() + timeout_seconds
         self._log(key, "analyze_started", {"text": request.text})
         self._ensure_not_timed_out(deadline)
 
         mentions, extraction_raw = self._extract_entities(request.text, key, deadline)
         self._ensure_not_timed_out(deadline)
-        candidate_search = getattr(self.wikidata, "search_candidate_groups", None)
-        path_search = getattr(self.wikidata, "find_candidate_paths", None)
-        disambiguation_raw: str | None = None
-        candidate_groups: list[WikidataCandidateGroup] = []
-        paths: list[WikidataPath] = []
-        if callable(candidate_search) and callable(path_search):
-            candidate_groups = cast(Any, candidate_search)(
-                mentions,
-                limit=self.candidate_limit,
-                context=request.text,
-            )
-            self._log(
-                key,
-                "wikidata_candidates",
-                {"candidate_groups": [_compact_candidate_group(group) for group in candidate_groups]},
-            )
-            self._ensure_not_timed_out(deadline)
-            paths = cast(Any, path_search)(
-                candidate_groups,
-                max_hops=self.max_path_hops,
-                hub_degree_threshold=self.hub_degree_threshold,
-                expansion_limit=self.path_expansion_limit,
-                path_limit=self.path_limit,
-            )
-            self._log(key, "wikidata_candidate_paths", {"paths": [path.to_dict() for path in paths]})
-            self._ensure_not_timed_out(deadline)
-            entities, disambiguation_raw = self._disambiguate_candidates(
-                request.text,
-                candidate_groups,
-                paths,
-                key,
-                deadline,
-            )
-        else:
-            entities = self.wikidata.resolve_entities(mentions, limit=self.candidate_limit, context=request.text)
+        candidate_groups = self.wikidata.search_candidate_groups(
+            mentions,
+            limit=self.candidate_limit,
+            context=request.text,
+        )
+        candidate_payload = [candidate_group_evidence(group) for group in candidate_groups]
+        self._log(key, "wikidata_candidates", {"candidate_groups": candidate_payload})
+        self._ensure_not_timed_out(deadline)
+        entities, disambiguation_raw = self._disambiguate_candidates(
+            request.text,
+            candidate_groups,
+            key,
+            deadline,
+        )
         self._log(key, "wikidata_entities", {"entities": [entity.to_dict() for entity in entities]})
 
         self._ensure_not_timed_out(deadline)
@@ -160,14 +138,14 @@ class HybridAgentService:
             entities,
             relationships,
             key,
-            getattr(request, "max_rdf_attempts", 3),
             deadline,
         )
         self._log(key, "rdf_built", {"rdf": rdf})
 
-        llm_outputs = {"entity_extraction": extraction_raw}
-        if disambiguation_raw is not None:
-            llm_outputs["candidate_disambiguation"] = disambiguation_raw
+        llm_outputs = {
+            "entity_extraction": extraction_raw,
+            "candidate_disambiguation": disambiguation_raw,
+        }
         response = AnalyzeResponse(
             text=request.text,
             entities=entities,
@@ -175,9 +153,7 @@ class HybridAgentService:
             rdf=rdf,
             llm=llm_outputs,
             ned={
-                "candidate_groups": [_compact_candidate_group(group) for group in candidate_groups],
-                "paths": [path.to_dict() for path in paths],
-                "path_summary": _summarize_paths(paths),
+                "candidate_groups": candidate_payload,
             },
         )
         self._log(
@@ -201,7 +177,6 @@ class HybridAgentService:
         self,
         text: str,
         groups: list[WikidataCandidateGroup],
-        paths: list[WikidataPath],
         key: str,
         deadline: float | None = None,
     ) -> tuple[list[WikidataEntity], str]:
@@ -223,11 +198,10 @@ class HybridAgentService:
                 "candidate_groups": [
                     {
                         "mention_index": index,
-                        **_compact_disambiguation_group(groups[index]),
+                        **disambiguation_evidence(groups[index]),
                     }
                     for index in pending_indices
                 ],
-                "graph_context": _summarize_paths(paths, character_limit=3000),
             }
             prompt = prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
             self._log(
@@ -248,7 +222,7 @@ class HybridAgentService:
             )
 
             try:
-                attempt_selections = _validated_disambiguation_selections(
+                attempt_selections = validate_selections(
                     raw,
                     groups,
                     set(pending_indices),
@@ -327,17 +301,17 @@ class HybridAgentService:
         )
         self._log(key, "llm_entity_response", {"response": raw})
 
-        payload = _json_from_text(raw)
+        payload = parse_entity_response(raw)
         items = payload["entities"]
-        mentions = [_mention_from_item(item) for item in items if isinstance(item, dict)]
+        mentions = [mention_from_item(item) for item in items if isinstance(item, dict)]
         mentions = [mention for mention in mentions if mention.surface]
         if not mentions:
             raise ValueError("The LLM returned no usable entity mentions.")
-        mentions = _realign_mentions(text, mentions)
+        mentions = realign_mentions(text, mentions)
         if not mentions:
             raise ValueError("The LLM entity mentions do not occur in the input text.")
-        mentions = _supplement_mentions(text, mentions, self.mention_limit)
-        return _dedupe_mentions(mentions)[: self.mention_limit], raw
+        mentions = supplement_mentions(text, mentions, self.mention_limit)
+        return mentions, raw
 
     def _build_valid_rdf(
         self,
@@ -345,10 +319,9 @@ class HybridAgentService:
         entities: list[WikidataEntity],
         relationships: list[WikidataRelationship],
         key: str,
-        max_attempts: int,
         deadline: float | None = None,
     ) -> str:
-        attempts = max(1, min(int(max_attempts or 3), 3))
+        attempts = 3
         last_error = None
 
         original_prompt = self._build_rdf_prompt(text, entities, relationships)
@@ -356,22 +329,20 @@ class HybridAgentService:
         for attempt in range(1, attempts + 1):
             model_response = self._build_rdf(prompt, key, deadline)
             try:
-                rdf = model_response_to_turtle(model_response)
-                _parse_rdf(rdf)
-                rdf = _ensure_entity_labels(
-                    rdf,
-                    text,
-                    entities,
-                    relationships,
-                )
-                _parse_rdf(rdf)
+                graph = model_response_to_graph(model_response)
+                remove_unresolved_resources(graph, entities, relationships)
+                materialize_relationships(graph, relationships)
+                add_text_cooccurrence_relations(graph, text, entities)
+                ensure_resource_labels(graph, entities, relationships)
+                validate_graph(graph)
+                rdf = serialize_graph(graph)
                 self._log(
                     key,
                     "rdf_validated",
                     {"attempt": attempt, "validation_method": "strict"},
                 )
                 return rdf
-            except Exception as exc:  # rdflib raises parser-specific exception classes.
+            except (ValueError, SyntaxError, ParserError) as exc:
                 last_error = str(exc)
                 self._log(
                     key,
@@ -383,7 +354,7 @@ class HybridAgentService:
                 prompt = _build_retry_prompt(
                     original_prompt,
                     model_response,
-                    last_error or "Invalid structured RDF response.",
+                    last_error or "Invalid RDF response.",
                 )
 
         raise RDFValidationError(
@@ -402,7 +373,7 @@ class HybridAgentService:
         payload = {
             "text": text,
             "source_attribution": "Source: Wikidata",
-            "entities": [_compact_entity(entity, statement_limit=0) for entity in entities],
+            "entities": [_entity_evidence(entity) for entity in entities],
             "relationships": [relationship.to_dict() for relationship in relationships],
         }
         return prompt_template.replace("${PAYLOAD}", json.dumps(payload, ensure_ascii=False, indent=2))
@@ -436,531 +407,11 @@ class HybridAgentService:
             self.request_logger.log(idempotence_key=key, event=event, payload=payload)
 
 
-def _json_object_from_text(text: str) -> dict[str, Any]:
-    cleaned = text.strip()
-    try:
-        payload = json.loads(cleaned)
-    except json.JSONDecodeError as original_error:
-        fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL)
-        if fenced:
-            payload = json.loads(fenced.group(1))
-        else:
-            if cleaned.startswith("{"):
-                raise original_error
-            decoder = json.JSONDecoder()
-            for match in re.finditer(r"\{", cleaned):
-                try:
-                    payload, _ = decoder.raw_decode(cleaned[match.start() :])
-                    break
-                except json.JSONDecodeError:
-                    continue
-            else:
-                raise original_error
-    if not isinstance(payload, dict):
-        raise ValueError("The LLM response must contain a JSON object.")
-    return payload
-
-
-def _json_from_text(text: str) -> dict[str, Any]:
-    payload = _json_object_from_text(text)
-    if not isinstance(payload.get("entities"), list):
-        raise ValueError("The LLM entity response must contain an entities array.")
-    return payload
-
-
-def _compact_disambiguation_group(group: WikidataCandidateGroup) -> dict[str, Any]:
-    return {
-        "mention": {
-            "surface": group.mention.surface,
-            "entity_type": group.mention.entity_type,
-        },
-        "candidates": [
-            {
-                "id": candidate.id,
-                "label": candidate.label,
-                "description": candidate.description,
-                "types": [
-                    {
-                        "relation": statement.get("property_label"),
-                        "label": statement.get("object_label"),
-                        "id": statement.get("object_id"),
-                    }
-                    for statement in candidate.statements[:2]
-                    if statement.get("property_id") in {"P31", "P279"}
-                ],
-            }
-            for candidate in group.candidates
-        ],
-    }
-
-
-def _validated_disambiguation_selections(
-    raw: str,
-    groups: list[WikidataCandidateGroup],
-    pending_indices: set[int],
-) -> dict[int, str]:
-    result = _json_object_from_text(raw)
-    items = result.get("selections")
-    if not isinstance(items, list):
-        raise ValueError("The LLM disambiguation response must contain a selections array.")
-
-    selections: dict[int, str] = {}
-    for selection in items:
-        if not isinstance(selection, dict):
-            raise ValueError("Every disambiguation selection must be a JSON object.")
-        if set(selection) != {"mention_index", "selected_id"}:
-            raise ValueError("Every disambiguation selection must contain only mention_index and selected_id.")
-        mention_index = _optional_int(selection.get("mention_index"))
-        selected_id = selection.get("selected_id")
-        if mention_index is None or not isinstance(selected_id, str):
-            raise ValueError("Every disambiguation selection must contain a valid index and QID string.")
-        if mention_index not in pending_indices:
-            raise ValueError(f"The LLM returned an unexpected selection for mention {mention_index}.")
-        if mention_index in selections:
-            raise ValueError(f"The LLM returned duplicate selections for mention {mention_index}.")
-        if not any(candidate.id == selected_id for candidate in groups[mention_index].candidates):
-            allowed = ", ".join(candidate.id or "" for candidate in groups[mention_index].candidates)
-            raise ValueError(
-                f"The LLM selected an invalid Wikidata ID for mention {mention_index}; allowed IDs: {allowed}."
-            )
-        selections[mention_index] = selected_id
-    return selections
-
-
-def _mention_from_item(item: dict[str, Any]) -> EntityMention:
-    return EntityMention(
-        surface=str(item.get("surface") or "").strip(),
-        start=_optional_int(item.get("start")),
-        end=_optional_int(item.get("end")),
-        entity_type=str(item.get("entity_type") or item.get("label") or "Entity"),
-        confidence=_optional_float(item.get("confidence")),
-    )
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _optional_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-_DESCRIPTOR_HEADS = (
-    "brand|car|vehicle|boat|ship|company|corporation|label|name|"
-    "musician|singer-songwriter|language|service|services|outlet|"
-    "fashion|line|lines|range"
-)
-
-
-def _supplement_mentions(
-    text: str,
-    mentions: list[EntityMention],
-    limit: int,
-) -> list[EntityMention]:
-    """Fill omitted relation/class concepts without inventing text spans."""
-    supplemental: list[EntityMention] = []
-    descriptor_pattern = re.compile(
-        rf"\b(?P<modifier>[A-Za-z][A-Za-z'-]*)\s+"
-        rf"(?P<head>{_DESCRIPTOR_HEADS})\b",
-        flags=re.IGNORECASE,
-    )
-    head_priority = {
-        "name": 0,
-        "label": 0,
-        "car": 1,
-        "boat": 1,
-        "ship": 1,
-    }
-    descriptor_matches = sorted(
-        descriptor_pattern.finditer(text),
-        key=lambda match: (
-            head_priority.get(match.group("head").casefold(), 2),
-            match.start(),
-        ),
-    )
-    ignored_modifiers = {
-        "a",
-        "an",
-        "and",
-        "as",
-        "in",
-        "its",
-        "of",
-        "on",
-        "or",
-        "the",
-        "to",
-    }
-    for match in descriptor_matches:
-        modifier = match.group("modifier")
-        if len(modifier) < 2 or modifier.casefold() in ignored_modifiers:
-            continue
-        supplemental.append(
-            EntityMention(
-                surface=modifier,
-                start=match.start("modifier"),
-                end=match.end("modifier"),
-                entity_type="Concept",
-                confidence=0.5,
-            )
-        )
-        supplemental.append(
-            EntityMention(
-                surface=match.group(0),
-                start=match.start(),
-                end=match.end(),
-                entity_type="Class",
-                confidence=0.5,
-            )
-        )
-
-    for match in re.finditer(
-        r"\b(?:type|class|model|series|no\.?)\s+(?P<value>\d+[A-Za-z]?)\b",
-        text,
-        flags=re.IGNORECASE,
-    ):
-        supplemental.append(
-            EntityMention(
-                surface=match.group("value"),
-                start=match.start("value"),
-                end=match.end("value"),
-                entity_type="Concept",
-                confidence=0.5,
-            )
-        )
-
-    return _dedupe_mentions([*mentions, *supplemental])[: max(1, int(limit))]
-
-
-def _dedupe_mentions(mentions: list[EntityMention]) -> list[EntityMention]:
-    seen: set[tuple[str, int | None, int | None]] = set()
-    deduped: list[EntityMention] = []
-    for mention in mentions:
-        key = (mention.surface.casefold(), mention.start, mention.end)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(mention)
-    return deduped
-
-
-def _realign_mentions(text: str, mentions: list[EntityMention]) -> list[EntityMention]:
-    """Realign model-provided offsets to exact, successive text occurrences."""
-    occupied_spans: list[tuple[int, int]] = []
-    cursor = 0
-    aligned: list[EntityMention] = []
-    for mention in mentions:
-        matches = list(re.finditer(re.escape(mention.surface), text, flags=re.IGNORECASE))
-        available = [
-            match
-            for match in matches
-            if not any(
-                match.start() < occupied_end and match.end() > occupied_start
-                for occupied_start, occupied_end in occupied_spans
-            )
-        ]
-        if not available:
-            continue
-        match = next((item for item in available if item.start() >= cursor), available[0])
-        occupied_spans.append((match.start(), match.end()))
-        cursor = max(cursor, match.end())
-        aligned.append(
-            EntityMention(
-                surface=mention.surface,
-                start=match.start(),
-                end=match.end(),
-                entity_type=mention.entity_type,
-                confidence=mention.confidence,
-            )
-        )
-    return aligned
-
-
-def _compact_entity(entity: WikidataEntity, statement_limit: int = 8) -> dict[str, Any]:
+def _entity_evidence(entity: WikidataEntity) -> dict[str, Any]:
+    """Keep entity identity and mention metadata in the RDF prompt."""
     payload = entity.to_dict()
-    if statement_limit <= 0:
-        payload.pop("statements", None)
-        return payload
-    statements = payload.get("statements") or []
-    priority = {"P31", "P279", "P361", "P527", "P1889", "P1582", "P171", "P105"}
-    payload["statements"] = sorted(
-        statements,
-        key=lambda item: 0 if item.get("property_id") in priority else 1,
-    )[:statement_limit]
+    payload.pop("statements")
     return payload
-
-
-def _compact_candidate_group(group: WikidataCandidateGroup) -> dict[str, Any]:
-    return {
-        "mention": group.mention.to_dict(),
-        "candidates": [
-            {
-                "id": candidate.id,
-                "label": candidate.label,
-                "description": candidate.description,
-                "score": candidate.score,
-                "type_statements": [
-                    statement
-                    for statement in candidate.statements
-                    if str(statement.get("property_id") or statement.get("property") or "") in {"P31", "P279"}
-                ][:4],
-            }
-            for candidate in group.candidates
-        ],
-    }
-
-
-def _summarize_paths(paths: list[WikidataPath], character_limit: int = 6000) -> str:
-    sentences: list[str] = []
-    seen: set[str] = set()
-    used = 0
-    for path in sorted(paths, key=lambda item: item.hops):
-        text = path.to_text().strip()
-        if not text or text.casefold() in seen:
-            continue
-        addition = len(text) + (1 if sentences else 0)
-        if used + addition > max(1, int(character_limit)):
-            break
-        seen.add(text.casefold())
-        sentences.append(text)
-        used += addition
-    return " ".join(sentences)
-
-
-def _strip_code_fence(text: str) -> str:
-    cleaned = text.strip()
-    fenced = re.search(r"```(?:turtle|ttl|rdf)?\s*(.*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
-        cleaned = fenced.group(1).strip()
-    prefix_index = cleaned.find("@prefix")
-    if prefix_index > 0:
-        cleaned = cleaned[prefix_index:].strip()
-    note_match = re.search(r"\n(?:Note|Please note|Explanation|The above)\b", cleaned, flags=re.IGNORECASE)
-    if note_match:
-        cleaned = cleaned[: note_match.start()].strip()
-    return cleaned.strip()
-
-
-def _parse_rdf(rdf_text: str) -> None:
-    if not rdf_text.strip():
-        raise ValueError("Empty RDF response.")
-    graph = Graph().parse(data=rdf_text, format="turtle")
-    # Prefix declarations alone parse successfully but produce an empty graph.
-    if len(graph) == 0:
-        raise ValueError("RDF response contains no triples.")
-
-
-def _ensure_entity_labels(
-    rdf_text: str,
-    text: str,
-    entities: list[WikidataEntity],
-    relationships: list[WikidataRelationship],
-) -> str:
-    """Add labels omitted by the LLM without changing resource identities.
-
-    Prompting remains useful, but this post-condition makes label-based SPARQL
-    reliable even when the model returns valid Turtle with missing labels.
-    """
-    graph = Graph().parse(data=rdf_text, format="turtle")
-    wd = Namespace("http://www.wikidata.org/entity/")
-    kg = Namespace("https://example.org/wikidata-description/")
-    graph.bind("rdfs", RDFS)
-    graph.bind("wd", wd)
-    graph.bind("kg", kg)
-
-    allowed_qids = {entity.id for entity in entities if entity.id and re.fullmatch(r"Q\d+", entity.id)}
-    allowed_qids.update(
-        entity_id
-        for relationship in relationships
-        for entity_id in (relationship.subject_id, relationship.object_id)
-        if re.fullmatch(r"Q\d+", entity_id)
-    )
-    _remove_unresolved_wikidata_resources(graph, allowed_qids, wd)
-
-    known_labels: dict[str, str] = {}
-    for entity in entities:
-        if entity.id:
-            # The mention is the human-readable form present in the input text.
-            # Prefer it over Wikidata's canonical label so label-anchored queries
-            # can find the generated graph using the wording the user supplied.
-            text_label = _human_readable_label(entity.mention.surface)
-            canonical_label = _human_readable_label(entity.label)
-            if text_label or canonical_label:
-                known_labels[entity.id] = text_label or canonical_label
-                graph.add(
-                    (
-                        wd[entity.id],
-                        RDFS.label,
-                        Literal(text_label or canonical_label, lang="en"),
-                    )
-                )
-    for relationship in relationships:
-        subject_label = _human_readable_label(relationship.subject_label)
-        object_label = _human_readable_label(relationship.object_label)
-        if subject_label:
-            known_labels.setdefault(relationship.subject_id, subject_label)
-        if object_label:
-            known_labels.setdefault(relationship.object_id, object_label)
-
-        if re.fullmatch(r"Q\d+", relationship.subject_id) and re.fullmatch(r"Q\d+", relationship.object_id):
-            graph.add(
-                (
-                    wd[relationship.subject_id],
-                    _relationship_predicate(relationship, kg),
-                    wd[relationship.object_id],
-                )
-            )
-
-    _ensure_text_cooccurrence_relations(graph, text, entities, kg, wd)
-
-    predicates = {predicate for _, predicate, _ in graph}
-    resources = {node for node in graph.subjects() if isinstance(node, URIRef)}
-    resources.update(node for node in graph.objects() if isinstance(node, URIRef))
-    for resource in resources:
-        if resource in predicates or resource in {RDF.type, RDFS.label}:
-            continue
-        label = _resource_label(resource, known_labels)
-        existing_labels = list(graph.objects(resource, RDFS.label))
-        for existing in existing_labels:
-            if not _human_readable_label(str(existing)):
-                graph.remove((resource, RDFS.label, existing))
-        existing_labels = list(graph.objects(resource, RDFS.label))
-        if not label or any(str(existing).casefold() == label.casefold() for existing in existing_labels):
-            continue
-        graph.add((resource, RDFS.label, Literal(label, lang="en")))
-
-    return graph.serialize(format="turtle")
-
-
-def _remove_unresolved_wikidata_resources(
-    graph: Graph,
-    allowed_qids: set[str],
-    wd: Namespace,
-) -> None:
-    namespace = str(wd)
-    for triple in list(graph):
-        subject, predicate, object_ = triple
-        wikidata_nodes = [
-            node
-            for node in (subject, predicate, object_)
-            if isinstance(node, URIRef) and str(node).startswith(namespace)
-        ]
-        if any(str(node).removeprefix(namespace) not in allowed_qids for node in wikidata_nodes):
-            graph.remove(triple)
-
-
-def _ensure_text_cooccurrence_relations(
-    graph: Graph,
-    text: str,
-    entities: list[WikidataEntity],
-    kg: Namespace,
-    wd: Namespace,
-) -> None:
-    """Add text-local connectivity and directed class/type semantics."""
-    segments = _discourse_segments(text)
-    entities_by_segment: dict[int, list[tuple[URIRef, WikidataEntity]]] = {}
-    for entity in entities:
-        if not entity.id or not re.fullmatch(r"Q\d+", entity.id):
-            continue
-        start = entity.mention.start
-        if start is None:
-            continue
-        segment_index = next(
-            (
-                index
-                for index, (segment_start, segment_end) in enumerate(segments)
-                if segment_start <= start < segment_end
-            ),
-            None,
-        )
-        if segment_index is None:
-            continue
-        resource = wd[entity.id]
-        segment_entities = entities_by_segment.setdefault(segment_index, [])
-        if not any(existing_resource == resource for existing_resource, _ in segment_entities):
-            segment_entities.append((resource, entity))
-
-    for segment_entities in entities_by_segment.values():
-        for left_index, (left, left_entity) in enumerate(segment_entities):
-            for right, right_entity in segment_entities[left_index + 1 :]:
-                graph.add((left, kg.related_to, right))
-                graph.add((right, kg.related_to, left))
-                if _is_classlike_mention(right_entity.mention):
-                    graph.add((left, kg["is"], right))
-                if _is_classlike_mention(left_entity.mention):
-                    graph.add((right, kg["is"], left))
-
-
-def _is_classlike_mention(mention: EntityMention) -> bool:
-    entity_type = str(mention.entity_type or "").casefold()
-    return any(marker in entity_type for marker in ("class", "concept", "object", "nationality"))
-
-
-def _discourse_segments(text: str) -> list[tuple[int, int]]:
-    boundaries = [0]
-    boundaries.extend(match.end() for match in re.finditer(r"(?<=[.!?])\s+(?=[A-Z])", text))
-    boundaries.append(len(text))
-    sentence_spans = [
-        (boundaries[index], boundaries[index + 1])
-        for index in range(len(boundaries) - 1)
-        if text[boundaries[index] : boundaries[index + 1]].strip()
-    ]
-    continuation = re.compile(
-        r"^(?:although|until|he|she|it|they|this|these|those|whose|which|the\s+(?:boat|brand|company))\b",
-        flags=re.IGNORECASE,
-    )
-    segments: list[tuple[int, int]] = []
-    for sentence_start, sentence_end in sentence_spans:
-        sentence_text = text[sentence_start:sentence_end].strip()
-        if segments and continuation.match(sentence_text):
-            segments[-1] = (segments[-1][0], sentence_end)
-        else:
-            segments.append((sentence_start, sentence_end))
-    return segments
-
-
-def _resource_label(resource: URIRef, known_labels: dict[str, str]) -> str:
-    value = str(resource)
-    qid_match = re.search(r"(?:^|/)(Q\d+)$", value)
-    if qid_match:
-        qid = qid_match.group(1)
-        return known_labels.get(qid, "")
-    local_name = re.split(r"[/#]", value.rstrip("/#"))[-1]
-    return _human_readable_label(re.sub(r"[_-]+", " ", local_name))
-
-
-def _human_readable_label(value: str | None) -> str:
-    label = str(value or "").strip()
-    return "" if re.fullmatch(r"(?:wd:)?Q\d+", label, flags=re.IGNORECASE) else label
-
-
-def _relationship_predicate(
-    relationship: WikidataRelationship,
-    kg: Namespace,
-) -> URIRef:
-    label = relationship.property_label.casefold().strip()
-    predicate_names = {
-        "instance of": "is",
-        "subclass of": "is",
-        "part of": "part_of",
-        "has part": "has_part",
-        "country": "located_in",
-        "location": "located_in",
-    }
-    local_name = predicate_names.get(label)
-    if not local_name:
-        local_name = re.sub(r"[^a-z0-9]+", "_", label).strip("_") or "related_to"
-    return kg[local_name]
 
 
 def _build_retry_prompt(original_prompt: str, invalid_response: str, parser_error: str) -> str:
@@ -968,20 +419,10 @@ def _build_retry_prompt(original_prompt: str, invalid_response: str, parser_erro
     previous = invalid_response[:6000]
     return (
         f"{original_prompt}\n\n"
-        "The previous structured RDF JSON could not be converted to RDF.\n"
+        "The previous RDF response was empty or invalid.\n"
         f"Validation error:\n{error}\n\n"
-        "Return the complete corrected JSON object using the required triples schema. Every "
-        "triple needs subject, predicate, object, and object_type. Return JSON only, without "
-        "Turtle, markdown, comments, or explanations.\n"
+        'Return the complete corrected JSON object with exactly one key, "rdf", containing '
+        "a non-empty valid Turtle string with the required rdfs, wd and kg prefix declarations. "
+        "Return JSON only, without Markdown, comments, or explanations.\n"
         f"Previous invalid response:\n{previous}"
     )
-
-
-def _coerce_timeout_seconds(value: Any, default: float) -> float:
-    if value in (None, ""):
-        return default
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return max(0.001, parsed)

@@ -1,30 +1,20 @@
-Build structured RDF triples for the input text using the extracted entities and Wikidata evidence.
+Build RDF/Turtle for the input text using the selected entities and Wikidata relationships.
 
 Input JSON:
 ${PAYLOAD}
 
-Return exactly one JSON object with a non-empty `triples` array. Each item must contain:
-- `subject`: `wd:Q...`, `kg:snake_case_name`, or another supported prefixed identifier
-- `predicate`: `rdf:type`, `rdfs:label`, or a concise `kg:snake_case_name`
-- `object`: a resource identifier or literal value
-- `object_type`: exactly `resource` or `literal`
-- optional `language` for literals, normally `en`
-- optional `datatype` for typed literals, such as `xsd:date`
+Return exactly one JSON object with a single key "rdf" whose value is a non-empty Turtle string. Return JSON only. Encode newlines as \n and escape double quotes within the string. Do not return a triples array, Markdown, or explanations.
+The Turtle string must begin with these exact prefix declarations, using angle brackets around each IRI:
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix wd: <http://www.wikidata.org/entity/> .
+@prefix kg: <https://example.org/wikidata-description/> .
 
 Rules:
-- Return JSON only. Do not return Turtle, prefixes, Markdown, comments, or explanations.
-- Preserve every `entities[].id` QID as the corresponding `wd:Q...` resource.
-- Never invent, change, normalize, or omit a provided QID.
-- Use each resolved resource in at least one semantic relationship triple.
+- Preserve every entities[].id QID as wd:Q... . Never invent, change, normalize, or omit a provided QID.
+- Use each resolved resource in at least one semantic relationship triple. Keep distinct QIDs as distinct resources.
 - Materialize every provided relationship exactly once with its subject and object QIDs.
-- Map `instance of` and `subclass of` to `kg:is`, `part of` to `kg:part_of`, and `has part`
-  to `kg:has_part`.
-- Convert every other property label to a concise snake_case `kg:` predicate.
-- Add an `rdfs:label` literal with language `en` for every resource. Prefer `mention.surface`, then
-  the entity or relationship label. Never use a QID as label text.
-- Create additional relationships needed to cover the complete input passage, but do not add facts
-  unrelated to the text or supplied relationships.
-- Keep distinct QIDs as distinct resources.
-- Set `object_type` to `resource` for identifiers and `literal` for literal values.
-- A literal may contain `language` or `datatype`, but not both.
-- Every triple must have a non-empty subject, predicate, object, and object_type.
+- Map instance of and subclass of to kg:is, part of to kg:part_of, and has part to kg:has_part. Convert other property labels to concise kg:snake_case predicates.
+- Add an rdfs:label literal with language en for every subject and object resource. Prefer mention.surface, then the entity or relationship label. Never use a QID as label text.
+- Cover the input passage, but do not add facts unrelated to the text or supplied relationships.
+- Use kg:snake_case names for additional concepts from the text. Declare any additional prefix before using it.
+- Every Turtle statement must be valid and end with a period.

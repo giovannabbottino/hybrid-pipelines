@@ -1,15 +1,40 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(frozen=True)
 class AnalyzeRequest:
     text: str
     idempotence_key: str | None = None
-    max_rdf_attempts: int = 3
     max_processing_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.text, str) or not self.text.strip():
+            raise ValueError("Field 'text' is required.")
+        if self.idempotence_key is not None and not isinstance(self.idempotence_key, str):
+            raise ValueError("Field 'idempotence_key' must be a string.")
+        object.__setattr__(self, "text", self.text.strip())
+        timeout = self.max_processing_seconds
+        if timeout is not None:
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+                raise ValueError("Field 'max_processing_seconds' must be a positive finite number.")
+            if not math.isfinite(timeout) or timeout <= 0:
+                raise ValueError("Field 'max_processing_seconds' must be a positive finite number.")
+
+    @classmethod
+    def from_payload(cls, payload: Any) -> AnalyzeRequest:
+        if not isinstance(payload, dict):
+            raise ValueError("Request body must be a JSON object.")
+        if "max_rdf_attempts" in payload:
+            raise ValueError("Field 'max_rdf_attempts' is not supported.")
+        return cls(
+            text=payload.get("text", ""),
+            idempotence_key=payload.get("idempotence_key"),
+            max_processing_seconds=payload.get("max_processing_seconds"),
+        )
 
 
 @dataclass(frozen=True)
@@ -19,6 +44,7 @@ class EntityMention:
     end: int | None = None
     entity_type: str | None = None
     confidence: float | None = None
+    source: Literal["llm", "lexical_rule"] = "llm"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -83,29 +109,6 @@ class WikidataRelationship:
             "object_id": self.object_id,
             "object_label": self.object_label,
             "source": self.source,
-        }
-
-
-@dataclass(frozen=True)
-class WikidataPath:
-    source_id: str
-    target_id: str
-    edges: list[WikidataRelationship] = field(default_factory=list)
-
-    @property
-    def hops(self) -> int:
-        return len(self.edges)
-
-    def to_text(self) -> str:
-        return " ".join(f"{edge.subject_label} {edge.property_label} {edge.object_label}." for edge in self.edges)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "source_id": self.source_id,
-            "target_id": self.target_id,
-            "hops": self.hops,
-            "edges": [edge.to_dict() for edge in self.edges],
-            "text": self.to_text(),
         }
 
 
