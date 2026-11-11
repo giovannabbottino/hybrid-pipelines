@@ -1,12 +1,14 @@
 # Prompts
 
-The system uses `prompt/system/agent.txt` and three task prompts: `entity-extraction.txt`, `candidate-disambiguation.txt`, and `rdf-build.txt`. Configurable prompt names are listed in [.env.example](../.env.example).
+The pipeline uses three prompts:
 
-Extraction receives `${TEXT}` and returns `{"entities":[...]}`. Disambiguation receives `${PAYLOAD}` and returns `{"selections":[{"mention_index":0,"selected_id":"Q312"}]}`. Only QIDs from the supplied candidates are accepted.
+- [System](../prompt/system/agent.txt): task order, evidence handling, and output rules.
+- [NED](../prompt/prompts/ned.txt): identifies mentions, directs MCP consultations, and selects identities. Receives the input text through `${TEXT}`.
+- [RDF](../prompt/prompts/rdf-build.txt): receives the text and validated entities through `${PAYLOAD}`, preserving the earlier evidence in the conversation.
 
-RDF generation receives `${PAYLOAD}` containing the text, selected entities, and relationships. Its response must be JSON containing only the `rdf` key, whose value is a Turtle string. Use `\n` for line breaks and `\"` for double quotes inside the JSON string. Do not include Markdown or explanations.
+NED returns `{"entities":[{"surface":"Adams","start":0,"end":5,"id":"Q42","label":"Douglas Adams"}]}`. The example assumes the input text is `Adams` and Q42 occurred in a successful tool result. Unresolved mentions use a null ID.
 
-The Turtle string must begin with these declarations:
+RDF returns exactly `{"rdf":"<Turtle>"}`. Its Turtle string must declare:
 
 ```turtle
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
@@ -14,4 +16,6 @@ The Turtle string must begin with these declarations:
 @prefix kg: <https://example.org/wikidata-description/> .
 ```
 
-Preserve supplied QIDs, use readable labels, and materialize the supplied relationships. Use `kg:is` for classification, `kg:part_of` and `kg:has_part` for composition, and `kg:snake_case` predicates for other relationships. The parser validates the JSON, prefixes, and Turtle syntax; empty or invalid responses are retried up to three total attempts.
+Instructions require readable labels and supported relationships, with `kg:is`, `kg:part_of`, `kg:has_part`, or other concise predicates. The code validates syntax, prefixes, non-empty content, and preservation of resolved Wikidata IDs. It does not certify factual correctness or enforce every semantic instruction in the prompt.
+
+Prompt paths are configurable in [.env.example](../.env.example). The former extraction and candidate-selection prompts have been replaced by the NED prompt.

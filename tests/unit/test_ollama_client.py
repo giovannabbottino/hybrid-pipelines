@@ -9,56 +9,50 @@ class StubResponse:
         return None
 
     def json(self) -> dict:
-        return {"response": "{}", "done": True}
+        return {"message": {"role": "assistant", "content": "{}"}, "done": True}
 
 
-def test_structured_stages_enable_ollama_json_contract(monkeypatch, tmp_path: Path):
+def test_chat_passes_tools_and_preserves_native_tool_calls(monkeypatch, tmp_path: Path):
     payloads = []
+    message = {
+        "role": "assistant",
+        "tool_calls": [{"function": {"name": "search_items", "arguments": {"query": "Adams"}}}],
+    }
+
+    class ToolResponse(StubResponse):
+        def json(self):
+            return {"message": message}
 
     def fake_post(url, json, timeout):
+        assert url == "http://ollama:11434/api/chat"
         payloads.append(json)
-        return StubResponse()
+        return ToolResponse()
 
     monkeypatch.setattr("hybrid_pipelines.infrastructure.ollama_client.requests.post", fake_post)
     client = OllamaClient(
-        OllamaClientConfig(
-            url="http://ollama:11434",
-            jsonl_path=tmp_path / "responses.jsonl",
-        )
+        OllamaClientConfig(url="http://ollama:11434/api/generate", jsonl_path=tmp_path / "responses.jsonl")
     )
-
-    client.generate("system", "prompt", "entity_extraction")
-    client.generate("system", "prompt", "candidate_disambiguation")
-    client.generate("system", "prompt", "rdf_build")
-
-    assert payloads[0]["format"] == "json"
-    disambiguation_schema = payloads[1]["format"]
-    assert disambiguation_schema["required"] == ["selections"]
-    assert disambiguation_schema["additionalProperties"] is False
-    selection_schema = disambiguation_schema["properties"]["selections"]
-    assert selection_schema["minItems"] == 1
-    assert selection_schema["items"]["required"] == ["mention_index", "selected_id"]
-    assert selection_schema["items"]["additionalProperties"] is False
-    assert selection_schema["items"]["properties"]["selected_id"]["pattern"] == "^Q[1-9][0-9]*$"
-    assert payloads[1]["options"]["num_predict"] == 512
-    rdf_schema = payloads[2]["format"]
-    assert rdf_schema["required"] == ["rdf"]
-    assert rdf_schema["additionalProperties"] is False
-    assert rdf_schema["properties"]["rdf"] == {"type": "string", "minLength": 1}
+    tools = [{"type": "function", "function": {"name": "search_items"}}]
+    assert client.chat([{"role": "user", "content": "Adams"}], tools, 30) == message
+    assert payloads[0]["tools"] == tools
+    assert "format" not in payloads[0]
 
 
-def test_generation_respects_both_ollama_timeout_and_request_budget(monkeypatch, tmp_path):
-    timeouts = []
+def test_rdf_schema_and_timeout_are_forwarded(monkeypatch, tmp_path):
+    from hybrid_pipelines.domain.structured_rdf import RDF_RESPONSE_SCHEMA
+
+    calls = []
 
     def fake_post(url, json, timeout):
-        timeouts.append(timeout)
+        calls.append((json, timeout))
         return StubResponse()
 
     monkeypatch.setattr("hybrid_pipelines.infrastructure.ollama_client.requests.post", fake_post)
     client = OllamaClient(OllamaClientConfig(jsonl_path=tmp_path / "responses.jsonl", timeout_seconds=300))
-    client.generate("system", "prompt", "rdf_build", timeout_seconds=540)
-    client.generate("system", "prompt", "rdf_build", timeout_seconds=10)
-    assert timeouts == [300, 10]
+    client.chat([], [], 540, RDF_RESPONSE_SCHEMA)
+    client.chat([], [], 10, RDF_RESPONSE_SCHEMA)
+    assert [call[1] for call in calls] == [300, 10]
+    assert calls[0][0]["format"] == RDF_RESPONSE_SCHEMA
 
 
 def test_jsonl_log_appends_one_record_per_line_with_native_types(tmp_path):
@@ -87,5 +81,5 @@ def test_log_write_failure_disables_logging_without_failing_generation(tmp_path,
     blocked_path.write_text("file instead of directory", encoding="utf-8")
     client = OllamaClient(OllamaClientConfig(jsonl_path=blocked_path / "responses.jsonl"))
     monkeypatch.setattr("hybrid_pipelines.infrastructure.ollama_client.requests.post", lambda *a, **kw: StubResponse())
-    assert client.generate("system", "prompt", "rdf_build") == "{}"
+    assert client.chat([], [], 10)["content"] == "{}"
     assert client._logging_disabled

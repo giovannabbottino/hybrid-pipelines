@@ -15,15 +15,15 @@ def test_invalid_numeric_environment_uses_default(monkeypatch, value):
 
 def test_settings_preserve_zero_and_apply_pipeline_limits(monkeypatch):
     monkeypatch.setenv("TEST_NUMBER", "0")
-    monkeypatch.setenv("WIKIDATA_CANDIDATE_LIMIT", "0")
-    monkeypatch.setenv("ENTITY_MENTION_LIMIT", "-10")
+    monkeypatch.setenv("MCP_MAX_TURNS", "0")
+    monkeypatch.setenv("MCP_MAX_TOOL_CALLS", "-10")
     monkeypatch.setenv("ANALYZE_TIMEOUT_SECONDS", "0.25")
     monkeypatch.setenv("ANALYZE_LOG_PATH", "")
     settings = PipelineSettings.from_env()
     assert int_env("TEST_NUMBER", 3) == 0
     assert float_env("TEST_NUMBER", 2.5) == 0.0
-    assert settings.candidate_limit == 1
-    assert settings.mention_limit == 1
+    assert settings.max_turns == 1
+    assert settings.max_tool_calls == 1
     assert settings.analyze_timeout_seconds == 1.0
     assert settings.analyze_log_path == ""
 

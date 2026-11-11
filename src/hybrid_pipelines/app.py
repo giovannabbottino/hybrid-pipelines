@@ -32,13 +32,12 @@ def create_app() -> Flask:
         wikidata=wikidata,
         prompt_repository=prompt_repository,
         system_prompt_name=settings.system_prompt_name,
-        entity_prompt_name=settings.entity_prompt_name,
-        disambiguation_prompt_name=settings.disambiguation_prompt_name,
+        ned_prompt_name=settings.ned_prompt_name,
         rdf_prompt_name=settings.rdf_prompt_name,
         request_logger=request_logger,
-        candidate_limit=settings.candidate_limit,
         analyze_timeout_seconds=settings.analyze_timeout_seconds,
-        mention_limit=settings.mention_limit,
+        max_turns=settings.max_turns,
+        max_tool_calls=settings.max_tool_calls,
     )
     app.register_blueprint(create_analyze_blueprint(service))
     return app

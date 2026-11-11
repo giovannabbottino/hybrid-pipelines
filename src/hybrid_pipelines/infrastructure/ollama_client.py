@@ -10,31 +10,8 @@ from typing import Any
 import requests
 
 from ..configuration import float_env, int_env
-from ..domain.structured_rdf import RDF_RESPONSE_SCHEMA
 
 logger = logging.getLogger(__name__)
-
-
-_CANDIDATE_DISAMBIGUATION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "selections": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "mention_index": {"type": "integer", "minimum": 0},
-                    "selected_id": {"type": "string", "pattern": "^Q[1-9][0-9]*$"},
-                },
-                "required": ["mention_index", "selected_id"],
-                "additionalProperties": False,
-            },
-        }
-    },
-    "required": ["selections"],
-    "additionalProperties": False,
-}
 
 
 @dataclass(frozen=True)
@@ -43,7 +20,6 @@ class OllamaClientConfig:
     model: str = "llama3.1:8b"
     jsonl_path: Path = Path("logs/ollama_responses.jsonl")
     timeout_seconds: float = 300.0
-    disambiguation_num_predict: int = 512
     options: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -70,7 +46,6 @@ class OllamaClientConfig:
             model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
             jsonl_path=Path(os.getenv("OLLAMA_JSONL_PATH", "logs/ollama_responses.jsonl")),
             timeout_seconds=float_env("OLLAMA_TIMEOUT_SECONDS") or 300.0,
-            disambiguation_num_predict=int_env("OLLAMA_DISAMBIGUATION_NUM_PREDICT") or 512,
             options=options,
         )
 
@@ -80,44 +55,42 @@ class OllamaClient:
         self.config = config
         self._logging_disabled = False
 
-    def generate(self, system_prompt: str, prompt: str, stage: str, timeout_seconds: float | None = None) -> str:
-        base_url = self.config.url.rstrip("/")
-        target_url = base_url if base_url.endswith("/api/generate") else f"{base_url}/api/generate"
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        timeout_seconds: float,
+        response_schema: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Preserve native tool calls and the complete conversation for the MCP host."""
+        base_url = self.config.url.rstrip("/").removesuffix("/api/generate").removesuffix("/api/chat")
         payload: dict[str, Any] = {
             "model": self.config.model,
-            "system": system_prompt,
-            "prompt": prompt,
+            "messages": messages,
+            "tools": tools,
             "stream": False,
         }
-        if stage == "entity_extraction":
-            payload["format"] = "json"
-        elif stage == "candidate_disambiguation":
-            payload["format"] = _CANDIDATE_DISAMBIGUATION_SCHEMA
-        elif stage == "rdf_build":
-            payload["format"] = RDF_RESPONSE_SCHEMA
-        options = dict(self.config.options)
-        if stage == "candidate_disambiguation":
-            configured_limit = options.get("num_predict")
-            stage_limit = self.config.disambiguation_num_predict
-            options["num_predict"] = min(configured_limit, stage_limit) if configured_limit else stage_limit
-        if options:
-            payload["options"] = options
-
-        timeout = (
-            min(timeout_seconds, self.config.timeout_seconds)
-            if timeout_seconds is not None
-            else self.config.timeout_seconds
+        if response_schema is not None:
+            payload["format"] = response_schema
+        if self.config.options:
+            payload["options"] = dict(self.config.options)
+        response = requests.post(
+            f"{base_url}/api/chat",
+            json=payload,
+            timeout=min(timeout_seconds, self.config.timeout_seconds),
         )
-        response = requests.post(target_url, json=payload, timeout=timeout)
         response.raise_for_status()
         data = response.json()
-        text = str(data.get("response") or "")
-        self._log(stage=stage, prompt=prompt, response=data)
-        return text
+        message = data.get("message")
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            raise RuntimeError("Ollama returned no assistant message for MCP tool calling.")
+        self._log("mcp_agent", json.dumps(messages, ensure_ascii=False), {**data, "response": message})
+        return message
 
     def health_check(self) -> dict[str, Any]:
         try:
-            response = requests.get(f"{self.config.url.rstrip('/')}/api/tags", timeout=5)
+            base_url = self.config.url.rstrip("/").removesuffix("/api/generate").removesuffix("/api/chat")
+            response = requests.get(f"{base_url}/api/tags", timeout=5)
             response.raise_for_status()
             return {"status": "ok", "model": self.config.model}
         except requests.RequestException as exc:

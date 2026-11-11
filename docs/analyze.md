@@ -2,7 +2,7 @@
 
 ## GET /health
 
-Checks Ollama and Wikidata MCP. Returns 200 when both are available; otherwise, returns 503 with each dependency's status.
+Checks Ollama connectivity and MCP initialization/tool discovery. Returns 200 when both are reachable, otherwise 503. Connectivity alone does not certify that the selected model supports tool calling.
 
 ## POST /analyze
 
@@ -10,20 +10,25 @@ Checks Ollama and Wikidata MCP. Returns 200 when both are available; otherwise, 
 {"text":"Mango is a fruit.","max_processing_seconds":540,"idempotence_key":"demo-1"}
 ```
 
-`text` is required and has leading and trailing whitespace removed. `max_processing_seconds` must be a positive finite number and overrides the request's processing time budget. `idempotence_key` is an optional string for grouping logs; it does not prevent reprocessing.
+The text is required and trimmed. The optional processing budget must be positive and finite. The idempotence key groups logs; it does not prevent reprocessing.
 
-The pipeline extracts mentions, retrieves Wikidata candidates and statements, asks the LLM to select QIDs, and identifies direct relationships. Disambiguation allows up to three attempts, resending only pending groups and never selecting candidates automatically.
+1. **NED:** the LLM identifies mentions, chooses MCP tools and arguments, and resolves Wikidata IDs. The host discovers tool schemas from the server and forwards tool results into the conversation. There is no local search sequence or candidate ranking.
+2. **RDF:** the LLM receives the validated entities and keeps the MCP evidence in the conversation. Tools are disabled during this stage.
 
-For RDF generation, the LLM must return a JSON object containing only the `rdf` key, with a non-empty valid Turtle string and the required `rdfs`, `wd`, and `kg` prefixes. Empty or invalid JSON or Turtle triggers another attempt, up to a fixed limit of three total attempts, subject to the processing time budget. Each retry includes the validation error.
+NED must return at least one mention with exact text offsets, a label, and an ID found in successful MCP results (or null when unresolved). It must make at least one successful MCP consultation. Membership in retrieved evidence does not prove that an ID is semantically correct for a mention. Three invalid NED answers stop processing; separate defaults limit NED to 20 turns and 40 tool calls.
 
-After validation, the application removes unresolved QIDs, materializes Wikidata relationships, adds text cooccurrence relationships, and completes labels. The response includes `text`, `entities`, `relationships`, `rdf`, `source_attribution`, `ned`, and `llm`. The `rdf` field is a Turtle string.
+RDF must be a JSON object containing only a non-empty `rdf` Turtle string, with the required `rdfs`, `wd`, and `kg` declarations. Its Wikidata resources must match the IDs resolved during NED. Invalid output receives feedback, up to three total RDF attempts. The application does not add triples, infer cooccurrence relations, or repair labels.
+
+The response contains `text`, `entities`, `rdf`, `tool_calls` (names, arguments, results), and `source_attribution`. Each entity contains `mention` (surface, start, end), `id`, `iri`, and `label`. Unresolved IDs and IRIs are null. Offsets are zero-based, end-exclusive character indices in the trimmed text.
+
+**Migration:** the former `relationships`, `ned`, and `llm` response fields were removed. Relationships are represented in the RDF; MCP evidence is available in `tool_calls`.
 
 | Status | Meaning |
 |---|---|
 | 200 | Analysis completed. |
 | 400 | Invalid request. |
-| 422 | Disambiguation or RDF validation attempts exhausted. |
-| 502 | External service failure. |
-| 504 | Timeout or processing time budget exhausted. |
+| 422 | NED or RDF validation limit reached. |
+| 502 | External failure, unavailable tool, or tool-call limit exceeded. |
+| 504 | Timeout or processing budget exhausted. |
 
-Use [.env.example](../.env.example) as the configuration reference; the application loads `.env`. Logs are written to `logs/analyze_log.jsonl` and `logs/ollama_responses.jsonl`.
+See [.env.example](../.env.example) for configuration. Logs are written to `logs/analyze_log.jsonl` and `logs/ollama_responses.jsonl`.

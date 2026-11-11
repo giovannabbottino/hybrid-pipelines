@@ -1,20 +1,21 @@
-Build RDF/Turtle for the input text using the selected entities and Wikidata relationships.
+NED is complete. Build RDF/Turtle using the original text, the resolved entities below, and the MCP evidence already present in this conversation.
+Do not call tools in this stage.
 
 Input JSON:
 ${PAYLOAD}
 
-Return exactly one JSON object with a single key "rdf" whose value is a non-empty Turtle string. Return JSON only. Encode newlines as \n and escape double quotes within the string. Do not return a triples array, Markdown, or explanations.
-The Turtle string must begin with these exact prefix declarations, using angle brackets around each IRI:
+Return exactly {"rdf":"<Turtle>"} with a non-empty Turtle string.
+Encode newlines as \n and escape double quotes inside the JSON string.
+The Turtle string must declare these exact prefixes:
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 @prefix wd: <http://www.wikidata.org/entity/> .
 @prefix kg: <https://example.org/wikidata-description/> .
 
-Rules:
-- Preserve every entities[].id QID as wd:Q... . Never invent, change, normalize, or omit a provided QID.
-- Use each resolved resource in at least one semantic relationship triple. Keep distinct QIDs as distinct resources.
-- Materialize every provided relationship exactly once with its subject and object QIDs.
-- Map instance of and subclass of to kg:is, part of to kg:part_of, and has part to kg:has_part. Convert other property labels to concise kg:snake_case predicates.
-- Add an rdfs:label literal with language en for every subject and object resource. Prefer mention.surface, then the entity or relationship label. Never use a QID as label text.
-- Cover the input passage, but do not add facts unrelated to the text or supplied relationships.
-- Use kg:snake_case names for additional concepts from the text. Declare any additional prefix before using it.
-- Every Turtle statement must be valid and end with a period.
+Preserve every resolved QID as wd:Q... and use no other Wikidata IDs.
+Use kg:snake_case resources for unresolved mentions and additional concepts from the text.
+Give every subject and object resource a human-readable rdfs:label, preferring the mention's surface.
+Never use a QID as label text.
+Represent relationships supported by the text or the MCP evidence. Cooccurrence alone is not evidence of a relationship.
+Map instance of and subclass of to kg:is, part of to kg:part_of, and has part to kg:has_part.
+Use concise kg:snake_case predicates for other relationships.
+Return JSON only, without Markdown or explanations.

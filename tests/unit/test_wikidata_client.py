@@ -1,83 +1,86 @@
-import requests
+import asyncio
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock, MagicMock
 
-from hybrid_pipelines.domain.models import EntityMention
-from hybrid_pipelines.infrastructure.wikidata_client import (
-    WikidataMCPClient,
-    WikidataMCPConfig,
-    _coerce_items,
-    _coerce_statements,
-)
+import pytest
+from mcp.types import ListToolsResult, Tool
 
-
-def test_mcp_parses_event_prefixed_sse_response(monkeypatch):
-    client = WikidataMCPClient(WikidataMCPConfig())
-    response = requests.Response()
-    response.status_code = 200
-    response._content = b'event: message\ndata: {"jsonrpc":"2.0","id":1,"result":{"items":[]}}\n\n'
-    monkeypatch.setattr(client, "_request_with_retries", lambda *args, **kwargs: response)
-
-    data, _ = client._post_jsonrpc({"jsonrpc": "2.0", "id": 1, "method": "tools/call"})
-
-    assert data["result"] == {"items": []}
+from hybrid_pipelines.infrastructure.wikidata_client import WikidataMCPClient, WikidataMCPConfig
 
 
-def test_mcp_text_results_are_parsed_into_entities_and_statements():
-    items = _coerce_items("Q169: mango — fruit of the mango tree")
-    statements = _coerce_statements("mango (Q169): subclass of (P279): fruit (Q3314483)")
-
-    assert items == [{"id": "Q169", "label": "mango", "description": "fruit of the mango tree"}]
-    assert statements == [
-        {
-            "subject_label": "mango",
-            "subject_id": "Q169",
-            "property_label": "subclass of",
-            "property_id": "P279",
-            "object_label": "fruit",
-            "object_id": "Q3314483",
-        }
-    ]
-
-
-def test_candidate_search_preserves_multiple_results_and_ranks_wikidata_type():
-    client = WikidataMCPClient(WikidataMCPConfig())
-    client.search_items = lambda query, limit=5: [
-        {"id": "Q100", "label": "Apple", "description": "fruit"},
-        {"id": "Q200", "label": "Apple", "description": "technology company"},
-        {"id": "Q300", "label": "Apple Foundation", "description": "organization"},
-    ]
-    client.get_statements = lambda entity_id: [
-        {
-            "property_id": "P31",
-            "property_label": "instance of",
-            "object_id": "Q43229" if entity_id in {"Q200", "Q300"} else "Q3314483",
-            "object_label": "organization" if entity_id in {"Q200", "Q300"} else "fruit",
-        }
-    ]
-
-    groups = client.search_candidate_groups(
-        [EntityMention(surface="Apple", entity_type="Organization")],
-        limit=2,
-        context="Apple released a computer.",
+def tool(name):
+    return Tool(
+        name=name,
+        description="Server description",
+        inputSchema={
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
     )
 
-    assert [candidate.id for candidate in groups[0].candidates] == ["Q200", "Q300"]
+
+def test_discovers_paginated_tool_schemas_and_filters_by_configuration():
+    session = MagicMock()
+    session.list_tools = AsyncMock(
+        side_effect=[
+            ListToolsResult(tools=[tool("search_items"), tool("delete_item")], nextCursor="page2"),
+            ListToolsResult(tools=[tool("get_statements")]),
+        ]
+    )
+    result = asyncio.run(WikidataMCPClient(WikidataMCPConfig()).list_tools(session))
+    assert [item["function"]["name"] for item in result] == ["search_items", "get_statements"]
+    assert result[0]["function"]["parameters"] == tool("search_items").inputSchema
+    assert session.list_tools.await_args_list[1].kwargs == {"cursor": "page2"}
 
 
-def test_candidate_search_caches_statements_regardless_of_confidence_or_origin():
-    client = WikidataMCPClient(WikidataMCPConfig())
-    client.search_items = lambda query, limit=5: [{"id": "Q1", "label": query}]
-    calls = []
+@pytest.mark.parametrize(
+    "pages",
+    [
+        [ListToolsResult(tools=[])],
+        [ListToolsResult(tools=[tool("search_items")], nextCursor="same")] * 2,
+    ],
+)
+def test_empty_or_repeated_tool_pages_fail(pages):
+    session = MagicMock()
+    session.list_tools = AsyncMock(side_effect=pages)
+    with pytest.raises(RuntimeError):
+        asyncio.run(WikidataMCPClient(WikidataMCPConfig()).list_tools(session))
 
-    def get_statements(entity_id):
-        calls.append(entity_id)
-        return [{"property_id": "P31", "object_id": "Q2"}]
 
-    client.get_statements = get_statements
-    mentions = [
-        EntityMention(surface="Main", confidence=0.5),
-        EntityMention(surface="Alias", confidence=0.9),
-        EntityMention(surface="Concept", source="lexical_rule"),
-    ]
-    groups = client.search_candidate_groups(mentions)
-    assert calls == ["Q1"]
-    assert all(group.candidates[0].statements for group in groups)
+def test_sdk_session_is_initialized_and_closed(monkeypatch):
+    session = MagicMock()
+    session.initialize = AsyncMock()
+    lifecycle = []
+
+    @asynccontextmanager
+    async def transport(url, http_client):
+        lifecycle.append("transport_open")
+        yield "read", "write", None
+        lifecycle.append("transport_closed")
+
+    @asynccontextmanager
+    async def client_session(read, write, read_timeout_seconds):
+        assert (read, write) == ("read", "write")
+        lifecycle.append("session_open")
+        yield session
+        lifecycle.append("session_closed")
+
+    monkeypatch.setattr("hybrid_pipelines.infrastructure.wikidata_client.streamable_http_client", transport)
+    monkeypatch.setattr("hybrid_pipelines.infrastructure.wikidata_client.ClientSession", client_session)
+
+    async def run():
+        async with WikidataMCPClient(WikidataMCPConfig()).connect() as connected:
+            assert connected is session
+            session.initialize.assert_awaited_once()
+
+    asyncio.run(run())
+    assert lifecycle == ["transport_open", "session_open", "session_closed", "transport_closed"]
+
+
+def test_configurable_tools_and_timeout(monkeypatch):
+    monkeypatch.setenv("WIKIDATA_MCP_TOOLS", " search_items, get_statements, ")
+    monkeypatch.setenv("WIKIDATA_TIMEOUT_SECONDS", "0")
+    config = WikidataMCPConfig.from_env()
+    assert config.allowed_tools == ("search_items", "get_statements")
+    assert config.timeout_seconds == 1

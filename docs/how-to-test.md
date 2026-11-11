@@ -1,12 +1,14 @@
 # Testing
 
-Run commands from the repository root with the virtual environment active.
+Run from the repository root:
 
 ```powershell
-python -m pip install -e ".[test,lint]"
-python -m pytest
-python -m ruff check .
-python -m pyright
+uv pip install --python .venv/Scripts/python.exe -e ".[test,lint]"
+.venv/Scripts/python.exe -m pytest
+.venv/Scripts/python.exe -m ruff check .
+.venv/Scripts/python.exe -m pyright
 ```
 
-Tests in `tests/unit/` cover extraction, disambiguation, the `{"rdf":"<Turtle>"}` contract, required prefixes, retries, HTTP errors, and logging. They do not require live Ollama or Wikidata access. GitHub Actions runs the same checks on Python 3.12.
+Unit tests cover model-directed tool calls, MCP schema discovery and session cleanup, NED evidence and offsets, unresolved mentions, retries, limits, RDF validation, HTTP responses, and logging. External calls are mocked so tests do not require Ollama or Wikidata.
+
+For a live check, run Ollama with a tool-capable model and start the API following [running](how-to-run.md). Check `GET /health`, then send a short text to `POST /analyze`. Inspect `tool_calls` in the response to confirm which consultations the model actually requested.

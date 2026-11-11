@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+import httpx
 import requests
 from flask import Blueprint, jsonify, request
+from mcp.shared.exceptions import McpError
 
 from ..application.services import CandidateDisambiguationError, RDFValidationError
 from ..domain.models import AnalyzeRequest, AnalyzeResponse
@@ -29,7 +31,7 @@ def create_analyze_blueprint(service: AnalyzeService) -> Blueprint:
         try:
             analyze_request = AnalyzeRequest.from_payload(request.get_json(silent=True))
             response = service.analyze(analyze_request)
-        except requests.Timeout as exc:
+        except (requests.Timeout, httpx.TimeoutException, TimeoutError) as exc:
             return (
                 jsonify(
                     {
@@ -43,24 +45,24 @@ def create_analyze_blueprint(service: AnalyzeService) -> Blueprint:
                 ),
                 504,
             )
-        except requests.RequestException as exc:
+        except (requests.RequestException, httpx.HTTPError, McpError) as exc:
             return jsonify({"error": "External service request failed.", "details": str(exc)}), 502
-        except RDFValidationError as exc:
+        except CandidateDisambiguationError as exc:
             return (
                 jsonify(
                     {
-                        "error": "RDF parsing failed.",
+                        "error": "Candidate disambiguation failed.",
                         "attempts": exc.attempts,
                         "details": exc.last_error,
                     }
                 ),
                 422,
             )
-        except CandidateDisambiguationError as exc:
+        except RDFValidationError as exc:
             return (
                 jsonify(
                     {
-                        "error": "Candidate disambiguation failed.",
+                        "error": "RDF parsing failed.",
                         "attempts": exc.attempts,
                         "details": exc.last_error,
                     }

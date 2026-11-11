@@ -5,7 +5,7 @@ Requires Python 3.12, uv, a running Ollama instance, and access to Wikidata MCP.
 ```powershell
 uv venv --python 3.12 --seed .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[test,lint]"
+uv pip install --python .venv/Scripts/python.exe -e ".[test,lint]"
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ollama pull llama3.1:8b
 python -m hybrid_pipelines
@@ -18,3 +18,7 @@ Invoke-RestMethod http://127.0.0.1:5050/health
 ```
 
 If the health check returns 503, check which dependency is unavailable. Adjust the model, URLs, limits, and timeouts in `.env`. Runtime logs are written to `logs/`.
+
+Use an Ollama model with native tool-calling support. The application uses `/api/chat` for NED and RDF, and the official MCP SDK for Wikidata. `WIKIDATA_MCP_TOOLS` selects the server tools exposed to the model. `MCP_MAX_TURNS` and `MCP_MAX_TOOL_CALLS` limit the NED conversation.
+
+When upgrading, install dependencies again. The old extraction, candidate-limit, mention-limit, and disambiguation-prompt settings are no longer used. Use `NED_PROMPT_NAME` for the combined NED task. Existing `.env` files are not overwritten.

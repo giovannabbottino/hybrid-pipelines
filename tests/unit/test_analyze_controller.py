@@ -97,3 +97,35 @@ def test_rejects_invalid_processing_budget(timeout) -> None:
     response = _client().post("/analyze", json={"text": "Mango.", "max_processing_seconds": timeout})
     assert response.status_code == 400
     assert response.get_json() == {"error": "Field 'max_processing_seconds' must be a positive finite number."}
+
+
+def test_success_returns_ned_entities_rdf_and_mcp_trace():
+    class SuccessService(FailingRDFService):
+        def analyze(self, request: AnalyzeRequest) -> AnalyzeResponse:
+            from hybrid_pipelines.domain.models import EntityMention, WikidataEntity
+
+            return AnalyzeResponse(
+                text=request.text,
+                entities=[
+                    WikidataEntity(EntityMention("Adams", 0, 5), "Q42", "http://www.wikidata.org/entity/Q42", "Adams")
+                ],
+                rdf="example Turtle",
+                tool_calls=[{"name": "search_items", "arguments": {"query": "Adams"}, "result": {}}],
+            )
+
+    response = _client(SuccessService()).post("/analyze", json={"text": "Adams"})
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["entities"][0]["id"] == "Q42"
+    assert body["tool_calls"][0]["name"] == "search_items"
+    assert set(body) == {"text", "entities", "rdf", "tool_calls", "source_attribution"}
+
+
+@pytest.mark.parametrize("error,status", [(TimeoutError("budget"), 504), (RuntimeError("tool limit"), 502)])
+def test_execution_errors_have_http_status(error, status):
+    class ErrorService(FailingRDFService):
+        def analyze(self, request: AnalyzeRequest) -> AnalyzeResponse:
+            raise error
+
+    response = _client(ErrorService()).post("/analyze", json={"text": "Adams"})
+    assert response.status_code == status

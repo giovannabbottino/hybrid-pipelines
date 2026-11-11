@@ -7,7 +7,7 @@ Flask API that builds knowledge graphs with Ollama and Wikidata evidence through
 ```powershell
 uv venv --python 3.12 --seed .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -e ".[test,lint]"
+uv pip install --python .venv/Scripts/python.exe -e ".[test,lint]"
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ollama pull llama3.1:8b
 python -m hybrid_pipelines
@@ -22,7 +22,9 @@ $body = @{ text = "Mango is a tropical fruit." } | ConvertTo-Json
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5050/analyze -ContentType application/json -Body $body
 ```
 
-`GET /health` checks Ollama and Wikidata. `POST /analyze` extracts mentions, retrieves Wikidata candidates, asks the LLM to select QIDs, and generates RDF. For RDF generation, the LLM returns `{"rdf":"<Turtle>"}`. The application validates the JSON, prefixes, and Turtle, applies graph rules, and returns `rdf` as a string.
+`POST /analyze` has two stages: NED with model-directed MCP consultations, then RDF generation. The LLM chooses the tools and query arguments, resolves mentions, and produces `{"rdf":"<Turtle>"}` using the evidence. The application validates the output without adding heuristic triples. The response includes the NED entities and a trace of MCP calls. See the [API contract and migration notes](docs/analyze.md).
+
+The model must support native tool calling through Ollama's `/api/chat`. The MCP Python SDK manages the remote session and discovers tool schemas; the configured allowlist defaults to `search_items,get_statements`. `GET /health` checks connectivity and MCP discovery.
 
 RDF generation allows up to three total attempts, including the first, when the response is empty or invalid. The attempt limit is fixed internally. External failures and the processing time budget may stop execution earlier. Logs are written to `logs/analyze_log.jsonl` and `logs/ollama_responses.jsonl`.
 
@@ -36,7 +38,7 @@ python -m pyright
 
 ## Structure
 
-- `src/hybrid_pipelines/application/`: orchestration, mentions, disambiguation, and graph enrichment.
+- `src/hybrid_pipelines/application/`: NED tool loop and RDF generation.
 - `src/hybrid_pipelines/domain/`: models and RDF validation.
 - `src/hybrid_pipelines/infrastructure/`: clients, prompts, and logging.
 - `prompt/`: LLM instructions.
