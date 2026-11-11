@@ -19,6 +19,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+    "pytest==7.4.4",
+    "pyright>=1.1.400,<2",
+    "ruff>=0.12,<1",
+]
 test = ["pytest==7.4.4"]
 lint = [
     "pyright>=1.1.400,<2",

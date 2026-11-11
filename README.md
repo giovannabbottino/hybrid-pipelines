@@ -1,47 +1,63 @@
 # Hybrid Pipelines
 
-Flask API that builds knowledge graphs with Ollama and Wikidata evidence through MCP. Requires Python 3.12, uv, Ollama, and access to Wikidata MCP.
+Flask API that builds RDF/Turtle knowledge graphs with Ollama and Wikidata evidence through MCP. The model first disambiguates entity mentions (NED), then generates RDF using the resolved entities and retrieved evidence.
 
-## Run
+## Requirements
+
+- Python 3.12 (the supported runtime).
+- A running Ollama instance with a model that supports native tool calling, plus access to Wikidata MCP.
+
+## Quick start
+
+Run from this project directory (`hybrid-pipelines/` when using the combined workspace):
 
 ```powershell
-uv venv --python 3.12 --seed .venv
+py -3.12 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-uv pip install --python .venv/Scripts/python.exe -e ".[test,lint]"
+python -m pip install -e ".[dev]"
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ollama pull llama3.1:8b
 python -m hybrid_pipelines
 ```
 
-Keep Ollama running. If `.env` already exists, edit it without overwriting your settings. The API listens on `http://127.0.0.1:5050`. Use [.env.example](.env.example) as the configuration reference; the application loads `.env` automatically.
+Keep Ollama running. Edit `.env` using [.env.example](.env.example); the application loads it automatically. If you select another model, pull that model instead. See the [run guide](docs/how-to-run.md) for Bash instructions and troubleshooting.
 
 ## Usage
 
+The default API address is `http://127.0.0.1:5050`. From another terminal:
+
 ```powershell
+Invoke-RestMethod http://127.0.0.1:5050/health
 $body = @{ text = "Mango is a tropical fruit." } | ConvertTo-Json
 Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5050/analyze -ContentType application/json -Body $body
 ```
 
-`POST /analyze` has two stages: NED with model-directed MCP consultations, then RDF generation. The LLM chooses the tools and query arguments, resolves mentions, and produces `{"rdf":"<Turtle>"}` using the evidence. The application validates the output without adding heuristic triples. The response includes the NED entities and a trace of MCP calls. See the [API contract and migration notes](docs/analyze.md).
+The model chooses MCP tools and arguments during NED. RDF generation runs with tools disabled and must preserve exactly the resolved Wikidata IDs. The model returns `{"rdf":"<Turtle>"}`; the service validates it and allows up to three RDF attempts. See the [API contract](docs/analyze.md) for request fields, response fields, and errors.
 
-The model must support native tool calling through Ollama's `/api/chat`. The MCP Python SDK manages the remote session and discovers tool schemas; the configured allowlist defaults to `search_items,get_statements`. `GET /health` checks connectivity and MCP discovery.
+## Configuration and logs
 
-RDF generation allows up to three total attempts, including the first, when the response is empty or invalid. The attempt limit is fixed internally. External failures and the processing time budget may stop execution earlier. Logs are written to `logs/analyze_log.jsonl` and `logs/ollama_responses.jsonl`.
+[.env.example](.env.example) lists the available settings. Defaults include `llama3.1:8b`, seed 42, temperature 0, and a 2048-token generation limit. Events and model responses are logged to `logs/analyze_log.jsonl` and `logs/ollama_responses.jsonl`.
 
-## Checks
+## Quality checks
+
+With the virtual environment active:
 
 ```powershell
-python -m pytest
+python -m ruff format --check .
 python -m ruff check .
 python -m pyright
+python -m pytest
 ```
 
-## Structure
+Tests use doubles for external services. CI runs the same checks on Python 3.12 for pushes, pull requests, and manual runs.
 
-- `src/hybrid_pipelines/application/`: NED tool loop and RDF generation.
-- `src/hybrid_pipelines/domain/`: models and RDF validation.
-- `src/hybrid_pipelines/infrastructure/`: clients, prompts, and logging.
-- `prompt/`: LLM instructions.
-- `tests/unit/`: tests without external services.
+## Project structure
 
-See [running](docs/how-to-run.md), [API](docs/analyze.md), [prompts](docs/prompt.md), and [testing](docs/how-to-test.md).
+- [src/hybrid_pipelines/](src/hybrid_pipelines/): application, domain, infrastructure, and HTTP controllers.
+- [prompt/](prompt/): system instructions and task templates.
+- [tests/](tests/): automated checks.
+- [docs/](docs/): operational and API documentation.
+
+## Documentation
+
+[Run guide](docs/how-to-run.md) · [API](docs/analyze.md) · [Prompts](docs/prompt.md) · [Testing](docs/how-to-test.md)

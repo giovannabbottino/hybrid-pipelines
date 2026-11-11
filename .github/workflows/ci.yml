@@ -13,11 +13,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  lint:
-    name: Lint and type check
+  quality:
+    name: Quality (Python 3.12)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -27,37 +26,22 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+          cache-dependency-path: pyproject.toml
 
-      - name: Install project and lint tools
-        run: python -m pip install --upgrade pip ".[lint,test]"
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
 
-      - name: Run Ruff
+      - name: Install project and development dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Check formatting
+        run: python -m ruff format --check .
+
+      - name: Run lint
         run: python -m ruff check .
 
-      - name: Run Pyright
+      - name: Run type checker
         run: python -m pyright
-
-  tests:
-    name: Tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12"]
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-
-      - name: Install project and test tools
-        run: python -m pip install --upgrade pip ".[test]"
 
       - name: Run tests
         run: python -m pytest
