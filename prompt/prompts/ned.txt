@@ -1,0 +1,14 @@
+Perform Named Entity Disambiguation (NED) for the text below.
+Identify entity and concept mentions, retrieve Wikidata candidates with the available MCP tools, and select the entity that fits each mention in context.
+You choose the tools, arguments, query wording, and sequence of consultations. Inspect statements when needed to resolve ambiguity or collect relationships for the later RDF stage.
+Keep separate occurrences when the same surface denotes different entities. Do not guess Wikidata IDs or choose the first search result without considering context.
+Use only IDs present in successful tool results. If a mention cannot be resolved, return id: null.
+Before completing NED, make at least one successful MCP consultation.
+
+Return exactly this JSON structure after consulting the tools:
+{"entities":[{"surface":"exact text span","start":0,"end":15,"id":"Q123","label":"human-readable label"}]}
+The example is a schema illustration, not an entity to copy.
+Each entity has exactly surface, start, end, id and label. Offsets are zero-based Python character indices, end-exclusive, in the original text. Include at least one mention, do not repeat identical spans, and provide a non-empty label. Return no RDF in this stage.
+
+Text:
+${TEXT}

@@ -1,30 +1,21 @@
-Build structured RDF triples for the input text using the extracted entities and Wikidata evidence.
+NED is complete. Build RDF/Turtle using the original text, the resolved entities below, and the MCP evidence already present in this conversation.
+Do not call tools in this stage.
 
 Input JSON:
 ${PAYLOAD}
 
-Return exactly one JSON object with a non-empty `triples` array. Each item must contain:
-- `subject`: `wd:Q...`, `kg:snake_case_name`, or another supported prefixed identifier
-- `predicate`: `rdf:type`, `rdfs:label`, or a concise `kg:snake_case_name`
-- `object`: a resource identifier or literal value
-- `object_type`: exactly `resource` or `literal`
-- optional `language` for literals, normally `en`
-- optional `datatype` for typed literals, such as `xsd:date`
+Return exactly {"rdf":"<Turtle>"} with a non-empty Turtle string.
+Encode newlines as \n and escape double quotes inside the JSON string.
+The Turtle string must declare these exact prefixes:
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix wd: <http://www.wikidata.org/entity/> .
+@prefix kg: <https://example.org/wikidata-description/> .
 
-Rules:
-- Return JSON only. Do not return Turtle, prefixes, Markdown, comments, or explanations.
-- Preserve every `entities[].id` QID as the corresponding `wd:Q...` resource.
-- Never invent, change, normalize, or omit a provided QID.
-- Use each resolved resource in at least one semantic relationship triple.
-- Materialize every provided relationship exactly once with its subject and object QIDs.
-- Map `instance of` and `subclass of` to `kg:is`, `part of` to `kg:part_of`, and `has part`
-  to `kg:has_part`.
-- Convert every other property label to a concise snake_case `kg:` predicate.
-- Add an `rdfs:label` literal with language `en` for every resource. Prefer `mention.surface`, then
-  the entity or relationship label. Never use a QID as label text.
-- Create additional relationships needed to cover the complete input passage, but do not add facts
-  unrelated to the text or supplied relationships.
-- Keep distinct QIDs as distinct resources.
-- Set `object_type` to `resource` for identifiers and `literal` for literal values.
-- A literal may contain `language` or `datatype`, but not both.
-- Every triple must have a non-empty subject, predicate, object, and object_type.
+Preserve every resolved QID as wd:Q... and use no other Wikidata IDs.
+Use kg:snake_case resources for unresolved mentions and additional concepts from the text.
+Give every subject and object resource a human-readable rdfs:label, preferring the mention's surface.
+Never use a QID as label text.
+Represent relationships supported by the text or the MCP evidence. Cooccurrence alone is not evidence of a relationship.
+Map instance of and subclass of to kg:is, part of to kg:part_of, and has part to kg:has_part.
+Use concise kg:snake_case predicates for other relationships.
+Return JSON only, without Markdown or explanations.

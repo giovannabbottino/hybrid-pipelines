@@ -1,131 +1,45 @@
-# Analyze
+# API
 
-## `GET /health`
+[README](../README.md) · [Run guide](how-to-run.md) · [Prompts](prompt.md)
 
-Checks the two external dependencies used by the agent:
+## GET /health
 
-- `llm` - Ollama `/api/tags`
-- `wikidata_mcp` - Wikidata lookup through the configured MCP endpoint
+Checks Ollama connectivity and MCP initialization/tool discovery. Returns 200 when both are reachable, otherwise 503. Connectivity alone does not certify that the selected model supports tool calling.
 
-The endpoint returns `200` when every dependency reports `status: ok`; otherwise it returns `503`.
+## POST /analyze
 
-Example response:
-
-```json
-{
-  "llm": {
-    "status": "ok",
-    "model": "llama3.1:8b"
-  },
-  "wikidata_mcp": {
-    "status": "ok",
-    "url": "https://wd-mcp.wmcloud.org/mcp/"
-  }
-}
-```
-
-## `POST /analyze`
-
-Runs the hybrid Wikidata-grounded knowledge graph pipeline.
-
-### Request body
+### Request
 
 ```json
-{
-  "text": "Mango is not a fruit from a tree.",
-  "idempotence_key": "optional-stable-key",
-  "max_rdf_attempts": 3
-}
+{"text":"Mango is a fruit.","max_processing_seconds":540,"idempotence_key":"demo-1"}
 ```
 
-Fields:
+The text is required and trimmed. The optional processing budget must be positive and finite. The idempotence key groups logs; it does not prevent reprocessing.
 
-| Field | Required | Description |
-|-------|----------|-------------|
-| `text` | Yes | Source text to analyze. Leading and trailing whitespace is stripped. |
-| `idempotence_key` | No | Stable key used to group events in `ANALYZE_LOG_PATH`. If omitted, the service generates a UUID. |
-| `max_rdf_attempts` | No | Number of RDF generation attempts, clamped from 1 to 3. Defaults to 3. Every retry uses the same LLM stage. |
+### Processing and response
 
-### Behavior
+1. **NED:** the LLM identifies mentions, chooses MCP tools and arguments, and resolves Wikidata IDs. The host discovers tool schemas from the server and forwards tool results into the conversation. There is no local search sequence or candidate ranking.
+2. **RDF:** the LLM receives the validated entities and keeps the MCP evidence in the conversation. Tools are disabled during this stage.
 
-1. Load the system prompt and entity extraction prompt.
-2. Replace `${TEXT}` with the request text.
-3. Ask the LLM to return strict JSON with entity/concept mentions.
-4. Strictly parse the JSON response. Invalid JSON, a non-object response, or no usable mentions fails the request.
-5. Realign model mentions to the text and supplement supported descriptor and numbered-concept patterns.
-6. Deduplicate mentions and keep at most `ENTITY_MENTION_LIMIT` (10 in the current `.env` and application default).
-7. Retrieve a candidate group for every mention through Wikidata MCP `search_items`.
-8. Fetch statements for every candidate through MCP `get_statements` and use P31/P279 evidence to rank ontology-compatible candidates.
+NED must return at least one mention with exact text offsets, a label, and an ID found in successful MCP results (or null when unresolved). It must make at least one successful MCP consultation. Membership in retrieved evidence does not prove that an ID is semantically correct for a mention. Three invalid NED answers stop processing; separate defaults limit NED to 20 turns and 40 tool calls.
 
-Wikidata MCP is the only evidence source. An MCP failure fails the request.
-9. Build paths of at most two hops between candidates from different mention groups. Intermediate nodes above the configured local-degree threshold are excluded.
-10. Translate each path to text and ask the LLM to select exactly one supplied QID for every non-empty candidate group. Valid partial selections are accumulated and only pending groups are retried, for at most three attempts. The service never chooses a candidate automatically; an unknown, malformed, duplicate, extra, cross-group, or ultimately missing QID returns HTTP 422.
-11. Keep direct relationships where a selected entity statement points to another selected entity.
-12. Load the RDF build prompt, inject a JSON payload with text, source attribution, compact selected entities, and relationships.
-13. Ask the LLM for structured triples under the shared JSON schema.
-14. Validate identifiers and literal metadata, build an RDFLib graph, apply the existing Wikidata-ID and label postconditions, and serialize it to Turtle. Invalid structured responses are retried with validation feedback.
-15. Return the analysis response, including auditable NED candidates and paths, and write request events/LLM CSV logs when configured.
+RDF must be a JSON object containing only a non-empty `rdf` Turtle string, with the required `rdfs`, `wd`, and `kg` declarations. Its Wikidata resources must match the IDs resolved during NED. Invalid output receives feedback, up to three total RDF attempts. The application does not add triples, infer cooccurrence relations, or repair labels.
 
-### Success response
+The response contains `text`, `entities`, `rdf`, `tool_calls` (names, arguments, results), and `source_attribution`. Each entity contains `mention` (surface, start, end), `id`, `iri`, and `label`. Unresolved IDs and IRIs are null. Offsets are zero-based, end-exclusive character indices in the trimmed text.
 
-```json
-{
-  "text": "Mango is not a fruit from a tree.",
-  "entities": [
-    {
-      "mention": {
-        "surface": "Mango",
-        "start": 0,
-        "end": 5,
-        "entity_type": "Entity",
-        "confidence": 0.2
-      },
-      "id": "Q3919027",
-      "iri": "http://www.wikidata.org/entity/Q3919027",
-      "label": "mango",
-      "description": "edible stone fruit of Mangifera",
-      "score": 1.0,
-      "statements": []
-    }
-  ],
-  "relationships": [
-    {
-      "subject_id": "Q3919027",
-      "subject_label": "mango",
-      "property_id": "P31",
-      "property_label": "instance of",
-      "object_id": "Q3314483",
-      "object_label": "fruit",
-      "source": "wikidata"
-    }
-  ],
-  "rdf": "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n@prefix wd: <http://www.wikidata.org/entity/> .\n@prefix kg: <https://example.org/wikidata-description/> .\n...",
-  "source_attribution": "Source: Wikidata",
-  "ned": {
-    "candidate_groups": [],
-    "paths": []
-  },
-  "llm": {
-    "entity_extraction": "{\"entities\":[{\"surface\":\"Mango\",\"start\":0,\"end\":5}]}",
-    "candidate_disambiguation": "{\"selections\":[{\"mention_index\":0,\"selected_id\":\"Q3919027\"}]}"
-  }
-}
-```
+**Migration:** the former `relationships`, `ned`, and `llm` response fields were removed. Relationships are represented in the RDF; MCP evidence is available in `tool_calls`.
 
-### Error responses
+### Status codes
 
-| Status | Cause | Response shape |
-|--------|-------|----------------|
-| `400` | Missing or blank `text`, or invalid local prompt path | `{ "error": "..." }` |
-| `502` | External service request failed, model request failed, or runtime generation error | `{ "error": "...", "details": "..." }` |
-| `422` | The model did not complete candidate disambiguation or did not return valid structured triples after the configured attempts | `{ "error": "Candidate disambiguation failed.", "attempts": 3, "details": "..." }` or `{ "error": "RDF parsing failed.", "attempts": 3, "details": "..." }` |
-| `504` | External service timeout | `{ "error": "External service request timed out.", "details": "...", "hint": "..." }` |
+| Status | Meaning |
+|---|---|
+| 200 | Analysis completed. |
+| 400 | Invalid request. |
+| 422 | NED or RDF validation limit reached. |
+| 502 | External failure, unavailable tool, or tool-call limit exceeded. |
+| 504 | Timeout or processing budget exhausted. |
 
-## Logs
 
-- Ollama generations are written to `OLLAMA_CSV_PATH` with `stage`, `model`, `prompt`, `response`, `created_at`, `done`, and `total_duration`.
-- Agent events are written to `ANALYZE_LOG_PATH` when configured. Events share the provided or generated `idempotence_key`.
+## Configuration and logs
 
-See the [structured RDF contract](structured-rdf.md) for identifier normalization,
-literal metadata, and legacy custom-client compatibility, and the
-[pipeline diagrams](diagrams.md) for generation and retry boundaries.
+See [.env.example](../.env.example) for configuration. Logs are written to `logs/analyze_log.jsonl` and `logs/ollama_responses.jsonl`.

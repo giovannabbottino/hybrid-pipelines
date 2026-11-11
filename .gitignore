@@ -213,3 +213,10 @@ __marimo__/
 
 data/
 *.tex
+
+# Runtime logs
+logs/*
+!logs/.gitkeep
+.env
+# Additional local Python environments
+.venv-*/

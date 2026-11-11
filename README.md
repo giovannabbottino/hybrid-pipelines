@@ -1,168 +1,63 @@
-# Hybrid Pipelines Wikidata Agent
+# Hybrid Pipelines
 
-Flask API that builds a knowledge graph by combining LLM prompts with Wikidata evidence. The service extracts entity mentions, resolves them through Wikidata MCP, finds direct relationships, asks the LLM for structured RDF triples, and serializes the final Turtle string with RDFLib. Dependency or validation failures are returned explicitly.
+Flask API that builds RDF/Turtle knowledge graphs with Ollama and Wikidata evidence through MCP. The model first disambiguates entity mentions (NED), then generates RDF using the resolved entities and retrieved evidence.
 
-This is the most explicitly grounded variant in the evaluation workspace. In
-contrast with the prompt-only and ontology-focused services, it materializes
-resolved entities, statements, and direct relationships before RDF generation.
+## Requirements
+
+- Python 3.12 (the supported runtime).
+- A running Ollama instance with a model that supports native tool calling, plus access to Wikidata MCP.
 
 ## Quick start
 
-Requirements: Python 3.12, Ollama with `llama3.1:8b`, and outbound
-HTTPS access to the configured Wikidata MCP endpoint.
+Run from this project directory (`hybrid-pipelines/` when using the combined workspace):
 
-```bash
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[dev]"
+if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 ollama pull llama3.1:8b
-python -m pip install -e ".[test,lint]"
 python -m hybrid_pipelines
 ```
 
-In another terminal:
+Keep Ollama running. Edit `.env` using [.env.example](.env.example); the application loads it automatically. If you select another model, pull that model instead. See the [run guide](docs/how-to-run.md) for Bash instructions and troubleshooting.
 
-```bash
-curl -X POST http://127.0.0.1:5050/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Mango is a tropical fruit.","max_rdf_attempts":3}'
+## Usage
+
+The default API address is `http://127.0.0.1:5050`. From another terminal:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:5050/health
+$body = @{ text = "Mango is a tropical fruit." } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5050/analyze -ContentType application/json -Body $body
 ```
 
-## Flow
+The model chooses MCP tools and arguments during NED. RDF generation runs with tools disabled and must preserve exactly the resolved Wikidata IDs. The model returns `{"rdf":"<Turtle>"}`; the service validates it and allows up to three RDF attempts. See the [API contract](docs/analyze.md) for request fields, response fields, and errors.
 
-1. The LLM extracts entity and concept mentions from the input text.
-2. The service strictly parses the extraction response, realigns extracted mentions, supplements supported lexical patterns, and deduplicates them. Invalid JSON or an empty extraction fails the request.
-3. Each mention is expanded to a Wikidata candidate group, limited by `WIKIDATA_CANDIDATE_LIMIT`; no candidate is selected yet.
-4. Wikidata statements are fetched for every candidate, and cross-mention paths of at most two hops are built from the bounded local subgraph. High-degree intermediate nodes are excluded.
-5. The LLM receives the original text, candidate groups, type evidence, and textual path context, then selects exactly one supplied QID per non-empty group. Missing or invalid selections are retried through the LLM for the pending groups only; the service never chooses a candidate automatically.
-6. Direct relationships among the selected entities are retained as evidence.
-7. The LLM receives the text, selected entity evidence, and relationships, then returns structured triples under a strict JSON schema.
-8. The application validates identifiers and literal metadata, builds an RDFLib graph, and returns its validated Turtle serialization.
+## Configuration and logs
 
-## Project Layout
+[.env.example](.env.example) lists the available settings. Defaults include `llama3.1:8b`, seed 42, temperature 0, and a 2048-token generation limit. Events and model responses are logged to `logs/analyze_log.jsonl` and `logs/ollama_responses.jsonl`.
 
-- `src/hybrid_pipelines/` - importable application package, organized into controller, application, domain, and infrastructure layers.
-- `prompt/system/` - System prompt for the Wikidata-grounded agent.
-- `prompt/prompts/` - Task prompts for entity extraction and RDF construction.
-- `docs/` - Endpoint, run, test, prompt, and sequence documentation.
-- `tests/` - Unit tests for service behavior and prompt constraints.
+## Quality checks
 
-## API Summary
+With the virtual environment active:
 
-### `GET /health`
-
-Checks Ollama and Wikidata availability. Returns `200` only when all checked parts report `status: ok`; otherwise returns `503`.
-
-### `POST /analyze`
-
-Request:
-
-```json
-{
-  "text": "Mango is not a fruit from a tree.",
-  "idempotence_key": "optional-stable-key",
-  "max_rdf_attempts": 3,
-  "max_processing_seconds": 540
-}
-```
-
-`max_rdf_attempts` is clamped to 1-3 and defaults to 3.
-`max_processing_seconds` optionally overrides the service-wide processing
-budget for that request.
-
-Response:
-
-```json
-{
-  "text": "Mango is not a fruit from a tree.",
-  "entities": [
-    {
-      "mention": {"surface": "Mango", "start": 0, "end": 5},
-      "id": "Q169",
-      "label": "mango"
-    }
-  ],
-  "relationships": [],
-  "rdf": "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n...",
-  "source_attribution": "Source: Wikidata",
-  "llm": {
-    "entity_extraction": "{\"entities\":[{\"surface\":\"Mango\",\"start\":0,\"end\":5}]}"
-  }
-}
-```
-
-See [docs/analyze.md](docs/analyze.md) for the full endpoint contract.
-See [docs/prompt.md](docs/prompt.md) for the prompt structure and editing guidelines.
-
-## Configuration
-
-| Variable | Default |
-|---|---|
-| `SYSTEM_PROMPT_NAME` | `system/agent.txt` |
-| `ENTITY_EXTRACTION_PROMPT_NAME` | `prompts/entity-extraction.txt` |
-| `CANDIDATE_DISAMBIGUATION_PROMPT_NAME` | `prompts/candidate-disambiguation.txt` |
-| `RDF_BUILD_PROMPT_NAME` | `prompts/rdf-build.txt` |
-| `WIKIDATA_MCP_URL` | `https://wd-mcp.wmcloud.org/mcp/` |
-| `WIKIDATA_LANGUAGE` | `en` |
-| `WIKIDATA_TIMEOUT_SECONDS` | `60` |
-| `WIKIDATA_CANDIDATE_LIMIT` | `3` |
-| `WIKIDATA_MAX_PATH_HOPS` | `2` |
-| `WIKIDATA_HUB_DEGREE_THRESHOLD` | `25` |
-| `WIKIDATA_PATH_EXPANSION_LIMIT` | `30` |
-| `WIKIDATA_PATH_LIMIT` | `24` |
-| `WIKIDATA_USER_AGENT` | `hybrid-pipelines-agent/1.0` |
-| `WIKIDATA_MAX_RETRIES` | `2` |
-| `WIKIDATA_RETRY_BACKOFF_SECONDS` | `2` |
-| `OLLAMA_API_URL` | `http://localhost:11434` |
-| `OLLAMA_MODEL` | `llama3.1:8b` |
-| `OLLAMA_CSV_PATH` | `data/ollama_responses.csv` |
-| `OLLAMA_TIMEOUT_SECONDS` | `300` |
-| `OLLAMA_DISAMBIGUATION_NUM_PREDICT` | `512` |
-| `ENTITY_MENTION_LIMIT` | `10` (lower values reduce sequential Wikidata lookups) |
-| `ANALYZE_TIMEOUT_SECONDS` | `540` |
-| `ANALYZE_LOG_PATH` | `data/analyze_log.jsonl` |
-
-Optional Ollama generation options are also supported: `OLLAMA_SEED`, `OLLAMA_TEMPERATURE`, `OLLAMA_TOP_K`, `OLLAMA_TOP_P`, `OLLAMA_MIN_P`, `OLLAMA_STOP`, `OLLAMA_NUM_CTX`, and `OLLAMA_NUM_PREDICT`.
-
-### Configured profile
-
-Entity extraction always uses the LLM. The current `.env` configures the following generation and mention limits:
-
-```env
-ENTITY_MENTION_LIMIT=10
-OLLAMA_NUM_CTX=8192
-OLLAMA_NUM_PREDICT=1536
-OLLAMA_DISAMBIGUATION_NUM_PREDICT=512
-OLLAMA_TEMPERATURE=0
-```
-
-With this profile, a successful request normally makes three LLM calls: entity
-extraction, candidate disambiguation, and RDF generation. Incomplete candidate
-disambiguation is retried up to three times for pending groups only; there is no
-heuristic candidate fallback. A client can set
-`max_rdf_attempts` from `1` to `3`; retries repeat only the structured-triple generation stage
-after validation feedback. The shared serializer normalizes `kg:` local names and guarantees
-Turtle syntax. Its system and RDF-build prompts use the same triple fields and identifier rules as
-the prompt-based and ontology-based pipelines.
-
-## Run
-
-```bash
-python -m pip install -e .
-python -m hybrid_pipelines
-```
-
-The service listens on `http://127.0.0.1:5050`.
-
-See [docs/how-to-run.md](docs/how-to-run.md) for Docker Compose and local setup details.
-
-Run the checks with:
-
-```bash
-python -m pytest
+```powershell
+python -m ruff format --check .
 python -m ruff check .
 python -m pyright
+python -m pytest
 ```
 
-## Pipeline documentation
+Tests use doubles for external services. CI runs the same checks on Python 3.12 for pushes, pull requests, and manual runs.
 
-![Pipeline process](docs/figures/process.png)
+## Project structure
 
-See [sequence diagram and regeneration instructions](docs/diagrams.md) and [structured RDF contract](docs/structured-rdf.md).
+- [src/hybrid_pipelines/](src/hybrid_pipelines/): application, domain, infrastructure, and HTTP controllers.
+- [prompt/](prompt/): system instructions and task templates.
+- [tests/](tests/): automated checks.
+- [docs/](docs/): operational and API documentation.
+
+## Documentation
+
+[Run guide](docs/how-to-run.md) · [API](docs/analyze.md) · [Prompts](docs/prompt.md) · [Testing](docs/how-to-test.md)

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from hybrid_pipelines.infrastructure.ollama_client import OllamaClient, OllamaClientConfig
@@ -8,41 +9,77 @@ class StubResponse:
         return None
 
     def json(self) -> dict:
-        return {"response": "{}", "done": True}
+        return {"message": {"role": "assistant", "content": "{}"}, "done": True}
 
 
-def test_structured_stages_enable_ollama_json_contract(monkeypatch, tmp_path: Path):
+def test_chat_passes_tools_and_preserves_native_tool_calls(monkeypatch, tmp_path: Path):
     payloads = []
+    message = {
+        "role": "assistant",
+        "tool_calls": [{"function": {"name": "search_items", "arguments": {"query": "Adams"}}}],
+    }
+
+    class ToolResponse(StubResponse):
+        def json(self):
+            return {"message": message}
 
     def fake_post(url, json, timeout):
+        assert url == "http://ollama:11434/api/chat"
         payloads.append(json)
-        return StubResponse()
+        return ToolResponse()
 
     monkeypatch.setattr("hybrid_pipelines.infrastructure.ollama_client.requests.post", fake_post)
     client = OllamaClient(
-        OllamaClientConfig(
-            url="http://ollama:11434",
-            csv_path=tmp_path / "responses.csv",
-        )
+        OllamaClientConfig(url="http://ollama:11434/api/generate", jsonl_path=tmp_path / "responses.jsonl")
     )
+    tools = [{"type": "function", "function": {"name": "search_items"}}]
+    assert client.chat([{"role": "user", "content": "Adams"}], tools, 30) == message
+    assert payloads[0]["tools"] == tools
+    assert "format" not in payloads[0]
 
-    client.generate("system", "prompt", "entity_extraction")
-    client.generate("system", "prompt", "candidate_disambiguation")
-    client.generate("system", "prompt", "rdf_build")
 
-    assert payloads[0]["format"] == "json"
-    disambiguation_schema = payloads[1]["format"]
-    assert disambiguation_schema["required"] == ["selections"]
-    assert disambiguation_schema["additionalProperties"] is False
-    selection_schema = disambiguation_schema["properties"]["selections"]
-    assert selection_schema["minItems"] == 1
-    assert selection_schema["items"]["required"] == ["mention_index", "selected_id"]
-    assert selection_schema["items"]["additionalProperties"] is False
-    assert selection_schema["items"]["properties"]["selected_id"]["pattern"] == "^Q[1-9][0-9]*$"
-    assert payloads[1]["options"]["num_predict"] == 512
-    rdf_schema = payloads[2]["format"]
-    assert rdf_schema["required"] == ["triples"]
-    assert rdf_schema["additionalProperties"] is False
-    triple_schema = rdf_schema["properties"]["triples"]["items"]
-    assert triple_schema["required"] == ["subject", "predicate", "object", "object_type"]
-    assert triple_schema["additionalProperties"] is False
+def test_rdf_schema_and_timeout_are_forwarded(monkeypatch, tmp_path):
+    from hybrid_pipelines.domain.structured_rdf import RDF_RESPONSE_SCHEMA
+
+    calls = []
+
+    def fake_post(url, json, timeout):
+        calls.append((json, timeout))
+        return StubResponse()
+
+    monkeypatch.setattr("hybrid_pipelines.infrastructure.ollama_client.requests.post", fake_post)
+    client = OllamaClient(OllamaClientConfig(jsonl_path=tmp_path / "responses.jsonl", timeout_seconds=300))
+    client.chat([], [], 540, RDF_RESPONSE_SCHEMA)
+    client.chat([], [], 10, RDF_RESPONSE_SCHEMA)
+    assert [call[1] for call in calls] == [300, 10]
+    assert calls[0][0]["format"] == RDF_RESPONSE_SCHEMA
+
+
+def test_jsonl_log_appends_one_record_per_line_with_native_types(tmp_path):
+    log_path = tmp_path / "logs" / "responses.jsonl"
+    client = OllamaClient(OllamaClientConfig(jsonl_path=log_path))
+    response = {
+        "model": "test-model",
+        "response": '{"rdf":"line one\\nline two"}',
+        "created_at": "2026-11-09T12:00:00Z",
+        "done": True,
+        "total_duration": 12345,
+    }
+    for stage in ("entity_extraction", "rdf_build"):
+        client._log(stage, "Ação\nsecond line", response)
+    lines = log_path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    entries = [json.loads(line) for line in lines]
+    assert [entry["stage"] for entry in entries] == ["entity_extraction", "rdf_build"]
+    assert entries[0] == {"stage": "entity_extraction", "prompt": "Ação\nsecond line", **response}
+    assert entries[1]["done"] is True
+    assert entries[1]["total_duration"] == 12345
+
+
+def test_log_write_failure_disables_logging_without_failing_generation(tmp_path, monkeypatch):
+    blocked_path = tmp_path / "blocked"
+    blocked_path.write_text("file instead of directory", encoding="utf-8")
+    client = OllamaClient(OllamaClientConfig(jsonl_path=blocked_path / "responses.jsonl"))
+    monkeypatch.setattr("hybrid_pipelines.infrastructure.ollama_client.requests.post", lambda *a, **kw: StubResponse())
+    assert client.chat([], [], 10)["content"] == "{}"
+    assert client._logging_disabled

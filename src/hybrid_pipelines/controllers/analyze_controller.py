@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
+import httpx
 import requests
 from flask import Blueprint, jsonify, request
+from mcp.shared.exceptions import McpError
 
 from ..application.services import CandidateDisambiguationError, RDFValidationError
 from ..domain.models import AnalyzeRequest, AnalyzeResponse
@@ -26,29 +28,10 @@ def create_analyze_blueprint(service: AnalyzeService) -> Blueprint:
 
     @blueprint.post("/analyze")
     def analyze() -> tuple:
-        payload = request.get_json(silent=True)
-        if not isinstance(payload, dict):
-            return jsonify({"error": "Request body must be a JSON object."}), 400
-        text = payload.get("text")
-        if not isinstance(text, str) or not text.strip():
-            return jsonify({"error": "Field 'text' is required."}), 400
-        idempotence_key = payload.get("idempotence_key")
-        if idempotence_key is not None and not isinstance(idempotence_key, str):
-            return jsonify({"error": "Field 'idempotence_key' must be a string."}), 400
-        max_rdf_attempts = payload.get("max_rdf_attempts", 3)
-        if not isinstance(max_rdf_attempts, int) or isinstance(max_rdf_attempts, bool):
-            return jsonify({"error": "Field 'max_rdf_attempts' must be an integer."}), 400
-
         try:
-            response = service.analyze(
-                AnalyzeRequest(
-                    text=text.strip(),
-                    idempotence_key=idempotence_key,
-                    max_rdf_attempts=max_rdf_attempts,
-                    max_processing_seconds=payload.get("max_processing_seconds"),
-                )
-            )
-        except requests.Timeout as exc:
+            analyze_request = AnalyzeRequest.from_payload(request.get_json(silent=True))
+            response = service.analyze(analyze_request)
+        except (requests.Timeout, httpx.TimeoutException, TimeoutError) as exc:
             return (
                 jsonify(
                     {
@@ -62,24 +45,24 @@ def create_analyze_blueprint(service: AnalyzeService) -> Blueprint:
                 ),
                 504,
             )
-        except requests.RequestException as exc:
+        except (requests.RequestException, httpx.HTTPError, McpError) as exc:
             return jsonify({"error": "External service request failed.", "details": str(exc)}), 502
-        except RDFValidationError as exc:
+        except CandidateDisambiguationError as exc:
             return (
                 jsonify(
                     {
-                        "error": "RDF parsing failed.",
+                        "error": "Candidate disambiguation failed.",
                         "attempts": exc.attempts,
                         "details": exc.last_error,
                     }
                 ),
                 422,
             )
-        except CandidateDisambiguationError as exc:
+        except RDFValidationError as exc:
             return (
                 jsonify(
                     {
-                        "error": "Candidate disambiguation failed.",
+                        "error": "RDF parsing failed.",
                         "attempts": exc.attempts,
                         "details": exc.last_error,
                     }
